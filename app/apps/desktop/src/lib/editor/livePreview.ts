@@ -24,7 +24,9 @@
 //
 // Raw HTML *blocks* embedded in a note render in place (never execute — see
 // HtmlEmbedWidget) unless the cursor is inside them, in which case the source
-// shows for editing.
+// shows for editing. A ```mermaid fence follows the same rule and draws itself
+// as a diagram (./mermaid/MermaidWidget); `fenceRenderKind` is the one place
+// that decides which fences render at all.
 //
 // GFM tables are the exception to that rule: they are ALWAYS the rendered
 // table, because their widget is editable (./table/TableWidget). Clicking a
@@ -43,7 +45,9 @@ import {
 import type { SyntaxNodeRef } from "@lezer/common";
 import { openExternal } from "../ipc";
 import { previewKind } from "../preview";
+import { fenceRenderKind } from "./fenceKind";
 import { frontmatterField } from "./frontmatter";
+import { MermaidWidget } from "./mermaid/MermaidWidget";
 import { CALLOUT_RE } from "./ofm/callout";
 import {
   activeLineChecker,
@@ -56,6 +60,7 @@ import {
 } from "./reveal";
 import { TableWidget } from "./table/TableWidget";
 import { TASK_RE } from "./tasks";
+import { isDangerousUrl } from "./urlSafety";
 import { wikilinkRe } from "./wikilinks";
 
 /** Turns an image `src` into a webview-loadable URL (see CreateEditorOptions). */
@@ -97,18 +102,6 @@ const BLOCKED_HTML_TAGS = new Set([
  * whole app away). `DOMParser` splits head/body even for a full-document paste,
  * so `<!DOCTYPE html>…<body>…` renders just its body content.
  */
-/**
- * Is a URL attribute value dangerous to keep? Browsers ignore ASCII whitespace
- * and control chars inside a scheme, so `java\tscript:` executes — strip those
- * before checking, then block script-y schemes and non-image `data:` (which can
- * carry `data:text/html`). A tab/newline no longer defeats the check.
- */
-function isDangerousUrl(raw: string): boolean {
-  const v = raw.replace(/[\u0000-\u0020]+/g, "").toLowerCase();
-  if (v.startsWith("data:")) return !v.startsWith("data:image/");
-  return v.startsWith("javascript:") || v.startsWith("vbscript:");
-}
-
 function renderEmbeddedHtml(target: HTMLElement, html: string, resolveAsset: ResolveAsset) {
   const parsed = new DOMParser().parseFromString(html, "text/html");
   parsed.querySelectorAll("*").forEach((el) => {
@@ -242,7 +235,8 @@ function frontmatterChecker(state: EditorState): (from: number, to: number) => b
 }
 
 /**
- * Block-level widgets (raw HTML blocks, ```html fences, GFM tables). These use
+ * Block-level widgets (raw HTML blocks, ```html / ```mermaid fences, GFM
+ * tables). These use
  * `Decoration.replace({block: true})` over multiple lines, which CodeMirror
  * only accepts from a StateField — a view plugin providing them throws
  * `RangeError: Block decorations may not be specified via plugins`. So they
@@ -303,21 +297,28 @@ function buildBlockDecorations(
         return false;
       }
 
-      // A ```html fenced block → render its HTML as an inline preview (the
-      // same sanitized render as a bare HTML block). The fence is what a
-      // pasted HTML snippet lands in (see paste.ts): it survives blank lines
-      // inside the markup, and shows raw source for editing when the cursor
-      // is inside it.
+      // A RENDERED fenced block (see ./fenceKind — the single authority):
+      //   ```html    → its HTML as an inline preview, the same sanitized
+      //                render as a bare HTML block. The fence is what a pasted
+      //                HTML snippet lands in (see paste.ts): it survives blank
+      //                lines inside the markup.
+      //   ```mermaid → the diagram it describes (./mermaid/MermaidWidget).
+      // Both show raw source for editing when the cursor is inside them, and
+      // both are ONE decoration over the whole node — two block replaces over
+      // the same range would throw.
       if (node.name === "FencedCode") {
         const info = node.node.getChild("CodeInfo");
-        const lang = info ? doc.sliceString(info.from, info.to).trim().toLowerCase() : "";
-        if ((lang === "html" || lang === "htm") && !isActive(node.from, node.to)) {
+        const kind = fenceRenderKind(info ? doc.sliceString(info.from, info.to) : "");
+        if (kind && !isActive(node.from, node.to)) {
           const codeNode = node.node.getChild("CodeText");
-          const html = codeNode ? doc.sliceString(codeNode.from, codeNode.to) : "";
-          if (html.trim()) {
+          const body = codeNode ? doc.sliceString(codeNode.from, codeNode.to) : "";
+          if (body.trim()) {
             decos.push(
               Decoration.replace({
-                widget: new HtmlEmbedWidget(html, resolveAsset),
+                widget:
+                  kind === "mermaid"
+                    ? new MermaidWidget(body)
+                    : new HtmlEmbedWidget(body, resolveAsset),
                 block: true,
               }).range(node.from, node.to)
             );
@@ -421,15 +422,13 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
           return false;
         }
 
-        // A non-active ```html fence is replaced by the StateField; skip its
-        // children. Non-HTML fences (and the active HTML fence) keep their raw
-        // source.
+        // A non-active RENDERED fence (```html, ```mermaid) is replaced by the
+        // StateField; skip its children. Plain fences — and a rendered one with
+        // the caret in it — keep their raw source.
         if (node.name === "FencedCode") {
           const info = node.node.getChild("CodeInfo");
-          const lang = info
-            ? doc.sliceString(info.from, info.to).trim().toLowerCase()
-            : "";
-          if ((lang === "html" || lang === "htm") && !isActive(node.from, node.to)) {
+          const kind = fenceRenderKind(info ? doc.sliceString(info.from, info.to) : "");
+          if (kind && !isActive(node.from, node.to)) {
             return false;
           }
           return;
@@ -553,7 +552,8 @@ function buildDecorations(view: EditorView, resolveAsset: ResolveAsset): Decorat
 
 /**
  * Live preview = two cooperating extensions:
- *  - a StateField for the block widgets (HTML blocks, ```html fences, tables) —
+ *  - a StateField for the block widgets (HTML blocks, ```html and ```mermaid
+ *    fences, tables) —
  *    the only place CodeMirror accepts block/multi-line replace decorations;
  *  - a view plugin for the inline marker work, rebuilt on edits, scroll, and
  *    cursor moves.

@@ -77,6 +77,13 @@ export interface DocSyncOptions {
   wsUrl?: string;
   onStatus?: (status: SyncStatus) => void;
   /**
+   * Fired when the mint came back **401** — the server refused the SESSION, not
+   * this document. Routed to one central guard (`sessionGuard.ts`, injected by
+   * `docSession.ts`) which re-checks the session before anything signs the app
+   * out; the status verdict below is unchanged either way.
+   */
+  onSessionRejected?: () => void;
+  /**
    * Fired when the set of *unsynced* local changes opens/closes: `true` the
    * moment a local edit is made (not yet acked by the server), `false` once
    * everything has flushed. Drives the "Saving…" badge state.
@@ -165,6 +172,7 @@ export class DocSync {
   private readonly api: ApiClient;
   private readonly docId: string;
   private readonly onStatus?: (status: SyncStatus) => void;
+  private readonly onSessionRejected?: () => void;
   private readonly onPending?: (pending: boolean) => void;
   private readonly onFlushed?: () => void;
   private readonly settleDelayMs: number;
@@ -198,6 +206,7 @@ export class DocSync {
     this.api = opts.api;
     this.docId = opts.docId;
     this.onStatus = opts.onStatus;
+    this.onSessionRejected = opts.onSessionRejected;
     this.onPending = opts.onPending;
     this.onFlushed = opts.onFlushed;
     this.settleDelayMs = opts.settleDelayMs ?? 700;
@@ -473,8 +482,15 @@ export class DocSync {
       // out of. A 401 means the stored session is no longer valid (expired, or
       // the user no longer exists on this server) — not this doc's fault, so it
       // reads as offline and lets the backoff stretch instead of retrying hard.
-      const status = mintFailureStatus(e instanceof ApiError ? e.status : undefined);
+      const httpStatus = e instanceof ApiError ? e.status : undefined;
+      const status = mintFailureStatus(httpStatus);
       this.setStatus(status);
+      // …and the one thing "offline" cannot express: a 401 is the SESSION being
+      // refused, and every mint from here (this doc's refresher, the next doc's
+      // first connect, the vault channel) will get the same answer. Announced
+      // rather than acted on — the guard on the other end re-checks the session
+      // before the app calls itself signed out. See `sessionGuard.ts`.
+      if (httpStatus === 401) this.onSessionRejected?.();
       if (isTerminalSyncStatus(status)) {
         this.refresher.cancel();
         // Terminal: anything waiting on a flush will never get one.

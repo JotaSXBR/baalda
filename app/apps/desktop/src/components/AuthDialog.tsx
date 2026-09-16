@@ -9,11 +9,19 @@ import {
   serverHost,
 } from "../lib/auth/serverChoice";
 import { readServerChoice, writeServerChoice } from "../lib/prefs";
+import {
+  initialEmail,
+  readRememberedEmail,
+  readRememberEmail,
+  rememberEmailAddress,
+  writeRememberEmail,
+} from "../lib/rememberedEmail";
 import { passwordResetFailureMessage } from "../lib/resetFlow";
 import { useStore } from "../store";
 import { AsyncButton } from "./AsyncButton";
 import { serverFailureMessage } from "./serverFailureMessage";
 import { Spinner } from "./Spinner";
+import { Switch } from "./Switch";
 
 /** Google's four-color "G" mark for the OAuth button. */
 function GoogleGlyph() {
@@ -121,10 +129,20 @@ export function AuthDialog({
     invitePrompt ? "sign-up" : initialMode,
   );
   const [name, setName] = useState("");
-  // Dev-only prefill of the local test account; production builds ship empty fields.
-  const [email, setEmail] = useState(
-    invitePrompt?.email ?? (import.meta.env.DEV ? "test@context.local" : ""),
+  // Invitation, then whatever this device was asked to remember, then the
+  // dev-only test account; production builds with nothing remembered ship an
+  // empty field (`initialEmail` holds that order of authority).
+  const [email, setEmail] = useState(() =>
+    initialEmail({
+      invitedEmail: invitePrompt?.email,
+      remembered: readRememberedEmail(),
+      devFallback: import.meta.env.DEV ? "test@context.local" : "",
+    }),
   );
+  // "Remember email address" (#120). Opens on its last answer, so someone who
+  // ticked it once never ticks it again. Only the address is ever kept — the
+  // password is not, and the session token lives in the OS keychain.
+  const [rememberEmail, setRememberEmail] = useState(readRememberEmail);
   const [password, setPassword] = useState(import.meta.env.DEV ? "Context-Test-2026!" : "");
   const [busy, setBusy] = useState(false);
   // Password reset: its own busy/error/sent state, because the outcome is not a
@@ -268,6 +286,17 @@ export function AuthDialog({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  /**
+   * Persist the switch the moment it moves, not at sign-in: unticking it is how
+   * a person says "forget the address you have", and that has to take effect
+   * even if they then close the card without signing in (`writeRememberEmail`
+   * clears the stored address on the way down).
+   */
+  const toggleRememberEmail = (next: boolean) => {
+    setRememberEmail(next);
+    writeRememberEmail(next);
+  };
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -287,6 +316,9 @@ export function AuthDialog({
       } else {
         await useStore.getState().signUp(name.trim(), email.trim(), password);
       }
+      // Only on the way out of a SUCCESSFUL attempt — a typo someone abandoned
+      // is not an address worth handing back. A no-op while the switch is off.
+      rememberEmailAddress(email.trim());
       setPassword("");
     } catch {
       /* error surfaced via authError */
@@ -625,8 +657,20 @@ export function AuthDialog({
                   minLength={8}
                   required
                 />
-                {mode === "sign-in" && resetAvailable && (
-                  <p className="auth-forgot">
+                {/* One row under the password field: what we may keep on the
+                    left, the way out on the right. "Forgot password?" kept its
+                    right edge — it still reads as belonging to the field above
+                    rather than as a second submit action. */}
+                <div className="auth-form-options">
+                  <label className="auth-remember">
+                    <Switch
+                      checked={rememberEmail}
+                      ariaLabel="Remember email address"
+                      onChange={toggleRememberEmail}
+                    />
+                    <span>Remember email address</span>
+                  </label>
+                  {mode === "sign-in" && resetAvailable && (
                     <button
                       type="button"
                       className="linkish"
@@ -638,8 +682,8 @@ export function AuthDialog({
                     >
                       Forgot password?
                     </button>
-                  </p>
-                )}
+                  )}
+                </div>
                 <button
                   className={`primary${busy ? " is-busy" : ""}`}
                   type="submit"

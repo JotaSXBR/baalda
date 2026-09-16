@@ -26,12 +26,17 @@ describe("viewingDocId", () => {
     );
   });
 
-  it("falls back to the local id when nothing is syncing the note", () => {
-    // A local-only vault, or a non-markdown file: no server id exists, and the
-    // local one is all anyone could match on.
-    expect(viewingDocId("local-uuid", null)).toBe("local-uuid");
-    expect(viewingDocId("local-uuid", undefined)).toBe("local-uuid");
-    expect(viewingDocId("local-uuid", "")).toBe("local-uuid");
+  it("announces NOTHING rather than a local id when there is no mapping", () => {
+    // #125. A local id is dropped in silence by both ends — the vault channel
+    // filters it against the receiver's readable set, and the sidebar looks it
+    // up in the same server-keyed map — so announcing one is worth exactly as
+    // much as announcing null, minus the damage: it makes the caller's "has the
+    // resolved id changed?" check think it has already said its piece, so the
+    // real id is never sent once the mapping lands. In a local-only vault no
+    // frame goes out at all, so nothing is lost here either.
+    expect(viewingDocId("local-uuid", null)).toBeNull();
+    expect(viewingDocId("local-uuid", undefined)).toBeNull();
+    expect(viewingDocId("local-uuid", "")).toBeNull();
   });
 
   it("announces nothing when no note is open", () => {

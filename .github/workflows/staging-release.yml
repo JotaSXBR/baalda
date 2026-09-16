@@ -303,9 +303,13 @@ jobs:
           fi
           echo "::add-mask::$STAGING_SERVER_URL"
 
-      # Tauri v2's documented Ubuntu prerequisite set, plus patchelf (AppImage).
+      # Tauri v2's documented Ubuntu prerequisite set, plus patchelf (AppImage)
+      # and libdbus-1-dev.
       # webkit2gtk **4.1** and **ayatana**-appindicator: the 4.0 / plain
       # libappindicator3-dev packages are Tauri v1's and do not link here.
+      # libdbus-1-dev is the build header for keyring's `sync-secret-service`
+      # backend — without it there is no Linux credential store and the session
+      # token dies with the process (#136/#129).
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -316,6 +320,7 @@ jobs:
             librsvg2-dev \
             libxdo-dev \
             libssl-dev \
+            libdbus-1-dev \
             build-essential \
             curl wget file patchelf
 

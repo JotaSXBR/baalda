@@ -39,7 +39,7 @@ import type { TreeNode } from "../ipc";
 import * as perf from "../perf";
 import { seedWelcomeContent } from "../vault/seed";
 import { Checkpointer, checkpointBatchFor } from "./checkpoint";
-import { planInbound, type InboundPlan } from "./inbound";
+import { planInbound, samePath, type InboundPlan } from "./inbound";
 import { REGISTRY_CONCURRENCY, runPool, withRetry } from "./pool";
 import { nullProgressSink, type SyncProgressSink } from "./progress";
 import { toast } from "../toast";
@@ -393,6 +393,23 @@ export class VaultRegistry {
   /** Local note paths the current pass must not re-register (see `InboundPlan.suppress`). */
   private inboundSuppressed = new Set<string>();
   /**
+   * Local note paths the server has told us are a DUPLICATE of an identity it
+   * already holds somewhere else (#129).
+   *
+   * `POST /api/notes` with a docId the vault already has at another path is an
+   * idempotent no-op that echoes the row's canonical `rel_path`. The file at the
+   * path we asked about is therefore a stale second copy — a move whose source
+   * survived, a materialize that raced a rename. It is left ON DISK and
+   * UNMAPPED: registering it as a new note would publish a duplicate of the note
+   * to the whole team, and deleting a user's file on a mapping disagreement is
+   * out of the question. Remembering it here is what stops the pull asking the
+   * same question every pass — which is what pinned `registering` at 0/N.
+   *
+   * Cleared per path the moment the server does account for it (the user removed
+   * or moved the duplicate), and wholesale on `reset`.
+   */
+  private aliasPaths = new Set<string>();
+  /**
    * Paths THIS device just created as materialized placeholders, awaiting their
    * own watcher echo (see {@link consumeMaterialized}).
    *
@@ -625,6 +642,8 @@ export class VaultRegistry {
     this.byPath.clear();
     this.byDocId.clear();
     this.byPathCi = null;
+    // Paths, so they belong to the vault we are leaving.
+    this.aliasPaths.clear();
     this.folderByPath.clear();
     this.pushed.clear();
     // A surviving baseline is exactly the cross-vault confusion this method
@@ -669,6 +688,29 @@ export class VaultRegistry {
   /** Server doc mapping for a note's vault-relative path, if registered. */
   getMapping(relPath: string): DocMapping | null {
     return this.byPath.get(relPath) ?? null;
+  }
+
+  /**
+   * {@link getMapping}, but tolerant of a case-different spelling.
+   *
+   * `byPath` is keyed by the path the SERVER says a doc lives at (see
+   * `registerNote`), while the sidebar and the editor know a note by its DISK
+   * spelling. On macOS/Windows those are the same file even when they disagree
+   * about case, so an exact `Map.get` can miss a note that is perfectly well
+   * mapped — which used to leave a teammate's presence dot homeless on the
+   * receiving side and made the sender announce nothing on the sending side
+   * (#125).
+   *
+   * Hot path (`peersForNode` runs per sidebar row, per render): an exact hit
+   * costs one `Map.get` and never touches the folded index; the O(n) build
+   * behind `canonicalNotePath` happens only on a genuine miss, is cached, and
+   * is invalidated once per mutation batch by `notifyMapChanged`.
+   */
+  getMappingCi(relPath: string): DocMapping | null {
+    const exact = this.byPath.get(relPath);
+    if (exact) return exact;
+    const canonical = this.canonicalNotePath(relPath);
+    return canonical ? (this.byPath.get(canonical) ?? null) : null;
   }
 
   /** Vault-relative path for a docId, if mapped (reverse of getMapping). */
@@ -1014,9 +1056,11 @@ export class VaultRegistry {
     // The registry's OWN map answers first, and it has to: a note this device
     // MATERIALIZED from the server got its file written by `writeNoteIfMissing`,
     // and Rust's indexer mints a fresh local UUID for any file it hasn't seen
-    // before. That local id never equals the server's `doc_id` — `byPath` is the
-    // only place the two identities are joined (see viewingDocId.ts, which says
-    // the same thing for presence).
+    // before. The materialize step now rebinds that row to the server's id
+    // straight away (#147), but every note materialized by an older build still
+    // carries the fork, so `byPath` remains the only place the two identities
+    // are reliably joined (see viewingDocId.ts, which says the same thing for
+    // presence).
     //
     // Keying this map on index ids alone therefore made every remote delete of a
     // materialized note a no-op: `local.get(serverDocId)` came back undefined, the
@@ -1405,10 +1449,58 @@ export class VaultRegistry {
     this.checkpoint?.setEveryItems(checkpointBatchFor(mapped));
   }
 
+  /**
+   * Map one path to one docId — and ONLY one.
+   *
+   * The invariant `byPath` and `byDocId` are two views of: a docId lives at
+   * exactly one path. Setting a docId that is already mapped elsewhere used to
+   * leave the old `byPath` key in place while `byDocId` flipped to the new path,
+   * so the two maps disagreed and `configSnapshot` persisted BOTH keys — the
+   * "duplicate path alias" of #129 (470 mapped paths for 464 identities). The
+   * consequences were all silent: the alias re-entered `missingNotes` on every
+   * pull (re-stamping `registering 0/N` forever), the canonical file lost its
+   * badge because `store.docIdByPath` is built from `byDocId`, and the bridge
+   * egested the doc's text into whichever path `byDocId` happened to hold.
+   *
+   * The LAST writer wins, deliberately: within a pass the server listing
+   * (`resolveNote`, step 3) runs before anything else that maps a note, so this
+   * is what lets the server's canonical spelling displace a stale one loaded
+   * from `.context/config.json`. Nothing after step 3 may displace a listing
+   * entry — the create pool no longer tries (see the `!samePath(serverPath, rp)`
+   * branch in `syncStructure`), which is what keeps this a backstop rather than
+   * a source of alternation between two spellings on successive passes.
+   */
   private setMapping(relPath: string, docId: string, vaultId: string): void {
+    const previous = this.byDocId.get(docId);
+    if (previous !== undefined && previous !== relPath) this.byPath.delete(previous);
     this.byPath.set(relPath, { vaultId, docId });
     this.byDocId.set(docId, relPath);
     this.notifyMapChanged();
+  }
+
+  /**
+   * Adopt `.context/config.json`'s `docs` map — ONE path per docId.
+   *
+   * Configs in the wild already carry duplicate path aliases (#129), and
+   * `configSnapshot` round-trips whatever it is given, so without a dedupe here
+   * an alias minted by an older build survives every relaunch even after the
+   * bug that minted it is gone.
+   *
+   * LAST entry wins. The file's key order is `byPath`'s insertion order, and in
+   * the shape that produced these aliases the stale path was already in the map
+   * when the canonical one arrived from the server listing — so the later key is
+   * the one the server agreed with. It is a tie-break, not a source of truth:
+   * this runs offline (`primeLocal` has no listing yet, and `reconcile` reads
+   * the config before it fetches one), and step 3 of `syncStructure` re-derives
+   * every mapping from the server on the same pass, with `setMapping` letting
+   * the listing displace whatever was loaded here.
+   */
+  private adoptConfigDocs(docs: Record<string, unknown>, vaultId: string): void {
+    const pathForDoc = new Map<string, string>();
+    for (const [rp, docId] of Object.entries(docs)) {
+      if (typeof docId === "string" && docId) pathForDoc.set(docId, rp);
+    }
+    for (const [docId, rp] of pathForDoc) this.setMapping(rp, docId, vaultId);
   }
 
   /**
@@ -1462,9 +1554,7 @@ export class VaultRegistry {
     // So a `markPushed` for a note opened during the window is persisted rather
     // than dropped (`reconcile` adopts this same checkpointer).
     this.newCheckpointer();
-    for (const [rp, docId] of Object.entries(cfg.docs ?? {})) {
-      if (typeof docId === "string" && docId) this.setMapping(rp, docId, cfg.serverVaultId);
-    }
+    this.adoptConfigDocs(cfg.docs ?? {}, cfg.serverVaultId);
     for (const [rp, id] of Object.entries(cfg.folders ?? {})) {
       if (typeof id === "string" && id) this.folderByPath.set(rp, id);
     }
@@ -1602,9 +1692,7 @@ export class VaultRegistry {
     // overwrites these entries from the server and step 4 prunes whatever the
     // server no longer lists, so nothing survives the pass unconfirmed.
     if (cfg.serverVaultId === vaultId && cfg.docs) {
-      for (const [rp, docId] of Object.entries(cfg.docs)) {
-        if (typeof docId === "string" && docId) this.setMapping(rp, docId, vaultId);
-      }
+      this.adoptConfigDocs(cfg.docs, vaultId);
     }
     // Restore the folder path → server-id join too (same collection guard). It
     // was written every pass and read back by nobody — so after a relaunch a
@@ -1852,7 +1940,12 @@ export class VaultRegistry {
     for (const [rp, m] of [...this.byPath]) {
       if (m.vaultId !== vaultId) {
         this.byPath.delete(rp);
-        this.byDocId.delete(m.docId);
+        // Only when the reverse entry is THIS path. A legacy config can still
+        // carry two paths for one docId (#129), and dropping one of them must
+        // never take the surviving path's identity with it — that silently
+        // removes the doc from `mappedNotes`, `allDocIds`, `contentWorkList`
+        // and every badge derived from them.
+        if (this.byDocId.get(m.docId) === rp) this.byDocId.delete(m.docId);
         this.notifyMapChanged();
       }
     }
@@ -1940,10 +2033,27 @@ export class VaultRegistry {
     // (or that we've lost access to) is still on disk, so it looks "missing from
     // the server" here and used to be re-created — which the server answers 201 to
     // without clearing `deleted_at`, leaving a sidebar entry that can never sync.
+    //
+    // `aliasPaths` is the same idea for the other refusal: a path the server has
+    // already told us is a duplicate of an identity it holds elsewhere (#129).
+    // Asking again can only get the same answer, so the pass would re-enter the
+    // `registering` phase — and reset its counter to 0/N — forever. Entries are
+    // dropped the moment the server DOES account for the path (the user deleted
+    // or moved the duplicate, or the note genuinely moved back), so a healed
+    // vault re-registers normally.
+    for (const rp of [...this.aliasPaths]) {
+      if (
+        resolvedNotePathsCi.has(rp.toLowerCase()) ||
+        !localNotePathCi.has(rp.toLowerCase())
+      ) {
+        this.aliasPaths.delete(rp);
+      }
+    }
     const missingNotes = notes.filter(
       (n) =>
         !resolvedNotePathsCi.has(n.path.toLowerCase()) &&
-        !this.inboundSuppressed.has(n.path),
+        !this.inboundSuppressed.has(n.path) &&
+        !this.aliasPaths.has(n.path),
     );
 
     this.sink.phase("registering", missingFolders.length + missingNotes.length);
@@ -2024,6 +2134,44 @@ export class VaultRegistry {
           { isTerminal: isTerminalApiError, shouldStop: () => this.stopRun() },
         );
         if (out.ok) {
+          const serverPath = noteRelPath(out.value);
+          // The server answers 200 in two quite different situations, and the
+          // `rel_path` it echoes is how they are told apart (#129):
+          //
+          //  * it accepted `rp`, or adopted a live row whose spelling is a
+          //    CASE-VARIANT of it (its uniqueness is `lower(rel_path)`, like the
+          //    filesystem's). Then `rp` — the local spelling — is what we map,
+          //    exactly as `resolveNote` does.
+          //  * the docId we supplied already names a row in this vault at a
+          //    DIFFERENT path. `INSERT … ON CONFLICT (id) DO NOTHING` wrote
+          //    nothing and the row did NOT move; the echo is the canonical path.
+          //    The file at `rp` is then a stale second copy of a note that is
+          //    already registered elsewhere, and mapping `rp` to that docId is
+          //    what minted the duplicate path alias: two paths, one identity, a
+          //    reverse map pointing at the stale copy, and both keys persisted
+          //    into `.context/config.json` to be reloaded forever.
+          //
+          // So: map nothing, claim nothing (`resolvedNotePaths` would shield the
+          // alias from the step-4 prune), report it once, and remember the path
+          // so the next pull does not ask the same question again. The FILE is
+          // left alone — see `aliasPaths`.
+          if (serverPath && !samePath(serverPath, rp)) {
+            this.aliasPaths.add(rp);
+            this.recordFailure({
+              kind: "note",
+              path: rp,
+              // Deliberately no docId. The identity is FINE — it is registered,
+              // it syncs, and it lives at `serverPath`. Badging it `error` would
+              // paint the healthy note's sidebar row red for a problem that
+              // belongs to the other FILE, and the content run would stamp it
+              // `synced` again moments later. The path is the whole report.
+              docId: null,
+              reason: `already registered at ${serverPath} — left on disk, not synced`,
+              code: null,
+            });
+            this.sink.item("failed");
+            return;
+          }
           // Keep `rp` (the local spelling) even when the server adopted a
           // case-variant and answered with its own — see `resolveNote`.
           this.setMapping(rp, noteDocId(out.value), vaultId);
@@ -2064,7 +2212,9 @@ export class VaultRegistry {
     for (const [rp, m] of [...this.byPath]) {
       if (!resolvedNotePathsCi.has(rp.toLowerCase())) {
         this.byPath.delete(rp);
-        this.byDocId.delete(m.docId);
+        // Reverse entry only if it still names this path — see the same guard in
+        // the cross-collection prune above (#129).
+        if (this.byDocId.get(m.docId) === rp) this.byDocId.delete(m.docId);
         this.notifyMapChanged();
       }
     }
@@ -2137,7 +2287,52 @@ export class VaultRegistry {
             // Remember it for one watcher echo, so the sync layer does not treat
             // our own placeholder as an external edit worth pushing.
             this.markMaterialized(rp);
+            // The mapping is already in `byPath`: step 3 registered/adopted
+            // every server note above, and `toMaterialize` is a subset of that
+            // same resolved server listing. No config.json re-read needed.
             const docId = this.byPath.get(rp)?.docId ?? null;
+            // Put the SERVER's doc_id on the row Rust just indexed, BEFORE
+            // anything can open the note.
+            //
+            // `writeNoteIfMissing` re-indexes synchronously, and `index_one`
+            // reuses an id only via `id_for_path` — a path Rust has never seen
+            // gets a FRESH `Uuid::new_v4()`. Without this rebind the note
+            // carries two identities for the rest of its life: `Editor.tsx`
+            // keys its bridge by the INDEX id (`ipc.getNoteMeta`) while
+            // `syncManager.openDoc` / `vaultDocStore` key `DocSync` by the
+            // registry's SERVER id — two Y.Docs, two local CRDT logs, one file
+            // (#147). Every teammate who joins a shared vault got this for
+            // every note they didn't already have.
+            //
+            // Safe here specifically because the row is one pass old and holds
+            // no CRDT: `rebind_note_id` re-keys `notes`/`note_tags`/`links` and
+            // re-resolves backlinks, but deliberately does NOT touch
+            // `yjs_updates`/`yjs_snapshot` — with nothing there yet that is a
+            // clean no-op rather than a stranded log. It also refuses (false,
+            // never a merge) when the id already belongs to a DIFFERENT path,
+            // so a stale row from an earlier run cannot break the UNIQUE path
+            // constraint or fork the note; we simply keep today's behaviour.
+            //
+            // Before `materializeContent`, which promotes a bridge under the
+            // server id and writes through it — that write re-indexes, and
+            // `id_for_path` then preserves the id we just bound.
+            if (docId) {
+              try {
+                const rebound = await ipc.rebindNoteId(rp, docId, this.epoch());
+                if (!rebound) {
+                  console.warn(`[registry] couldn't rebind ${rp} to ${docId} (id taken?)`);
+                }
+              } catch (e) {
+                // Never abort the pull for this: the old behaviour (a note with
+                // a local-only index id) is the fallback, and it is what every
+                // build before this one did.
+                if (!ipc.isVaultMismatch(e)) {
+                  console.warn(`[registry] rebinding ${rp} to ${docId} failed`, e);
+                } else {
+                  return; // the vault moved on
+                }
+              }
+            }
             // Fill it in from local CRDT when this device has it. Best effort: a
             // failure leaves today's 0-byte placeholder, which is exactly the
             // current behaviour, so this can never make things worse.

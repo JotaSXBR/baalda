@@ -68,7 +68,6 @@ import { planTurnOnSync } from "./lib/vault/turnOnSync";
 import { planOpen } from "./lib/sync/openGate";
 import { rediscoverVaultFolder } from "./lib/vault/rediscover";
 import { playJoinChime } from "./lib/celebrate/celebrate";
-import { viewingDocId } from "./lib/presence/viewingDocId";
 import { dismissToast, toast } from "./lib/toast";
 import { parseNoteLink } from "./lib/shareLink";
 import { parseInviteDeepLink } from "./lib/inviteLink";
@@ -514,6 +513,15 @@ interface AppStore {
   signInWithGoogle: () => Promise<void>;
   signUp: (name: string, email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  /**
+   * The server has told us our session is gone, mid-run — a 30-day session that
+   * lapsed while the app stayed open, or a revocation from another device. Not a
+   * user action, so it is deliberately NOT `signOut`: the vault stays open, the
+   * editor keeps working, and the #145 banner explains that edits are staying on
+   * this device. Called by the sync layer's session guard, which has already
+   * re-checked the session with the server.
+   */
+  handleSessionExpired: () => void;
   /**
    * Run the post-sign-in landing on demand, for a flow that deliberately
    * suppressed it and then fell through (abandoning "join a team" after the
@@ -1771,11 +1779,12 @@ export const useStore = create<AppStore>((set, get) => ({
       // alternative is threading a flag through all of this action's callers.
       get().requestReveal(path);
       // Tell teammates which note we're now viewing (drives their sidebar dots).
-      // The announced id must be the SERVER doc_id — see `viewingDocId`, which
-      // exists to hold that reasoning and a regression test for it.
-      syncManager.setViewing(
-        viewingDocId(meta?.id, syncManager.registry.getMapping(path)?.docId),
-      );
+      // The announced id must be the SERVER doc_id — see `viewingDocId`. We hand
+      // over the PATH rather than a resolved id: opening a note while the
+      // post-join reconcile is still running finds no mapping yet, and a value
+      // resolved here would be replayed, unchanged, for the whole session (#125).
+      // The sync layer re-resolves on every announce and again when the map moves.
+      syncManager.setViewing(path, meta?.id ?? null);
       await get().refreshBacklinks();
     } finally {
       // Only the newest open clears it: two quick clicks would otherwise have the
@@ -2125,6 +2134,11 @@ export const useStore = create<AppStore>((set, get) => ({
 
   initAuth: async () => {
     syncManager.setStatusListener((status) => get().setSyncStatus(status));
+    // The server refused our session at token mint and a fresh session check
+    // agreed it is gone (`sync/sessionGuard.ts`). Fires at most once per
+    // session — this is what makes an expiry mid-run visible NOW instead of at
+    // the next launch (#145).
+    syncManager.setSessionRejectedListener(() => get().handleSessionExpired());
     syncManager.setActivityListeners({
       onPending: (pending) => get().setSyncPending(pending),
       onFlushed: () => get().markSynced(),
@@ -2417,6 +2431,29 @@ export const useStore = create<AppStore>((set, get) => ({
     void ipc.clearLastVault().catch(() => {
   /* best-effort — worst case the next launch reopens the vault */
 });
+  },
+
+  handleSessionExpired: () => {
+    // Nothing to drop: already signed out, or a sign-out landed first.
+    if (get().authStatus !== "signed-in" && !get().session) return;
+    // This flow owns the session from here: a detached `initAuth` still
+    // restoring the previous one must not land it back on top of ours.
+    ++authInitGen;
+    // Stop minting. Every provider (the open note's, the uploader's, the vault
+    // channel's) would otherwise keep retrying a token the server will refuse
+    // for as long as the app stays open — the loop guard the guard's own latch
+    // cannot supply, because it only silences the REPORT.
+    leaveVaultSync();
+    console.warn("[auth] server refused the session — signing out locally");
+    // Exactly the fields `initAuth`'s signed-out branch sets, plus the sync flag
+    // `leaveVaultSync` just made false in fact. Emphatically NOT
+    // `vaultScopedSyncReset()` and not `signOut`'s list: those close the vault
+    // and clear `openFolderIsSynced`, which is the very input the banner needs
+    // to say "this synced vault is not syncing". The user keeps their notes on
+    // screen and signs back in from the banner.
+    set({ session: null, authStatus: "signed-out", syncEnabled: false });
+    // No note will ever get a provider now, so nothing may wait on one.
+    resolveSyncGate();
   },
 
   landAfterAuth: async () => {

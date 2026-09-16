@@ -2,7 +2,7 @@
 //! stay inside the vault before touching the filesystem. Writes are atomic
 //! (temp file + rename) so a crash mid-save never truncates a note.
 
-use crate::error::{AppError, AppResult};
+use crate::error::{io_ctx, AppError, AppResult};
 use crate::vault::resolve_in_vault;
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -10,7 +10,7 @@ use std::path::Path;
 /// Read a `.md` note to a string (vault-relative path).
 pub fn read_note(vault: &Path, rel: &str) -> AppResult<String> {
     let abs = resolve_in_vault(vault, rel)?;
-    Ok(std::fs::read_to_string(&abs)?)
+    std::fs::read_to_string(&abs).map_err(io_ctx("read the note", &abs))
 }
 
 /// Atomic write: write to a temp file in the same dir, then rename over the
@@ -20,7 +20,10 @@ pub fn write_note(vault: &Path, rel: &str, content: &str) -> AppResult<()> {
     let parent = abs
         .parent()
         .ok_or_else(|| AppError::new("note has no parent directory"))?;
-    std::fs::create_dir_all(parent)?;
+    // Named + logged (`io_ctx`), not a bare `?`: `write_note_if_missing` runs on
+    // the join path that #128 failed on, where an unnamed os error 2 could have
+    // been any of half a dozen calls.
+    std::fs::create_dir_all(parent).map_err(io_ctx("create the folder", parent))?;
 
     let file_name = abs
         .file_name()
@@ -28,9 +31,9 @@ pub fn write_note(vault: &Path, rel: &str, content: &str) -> AppResult<()> {
         .ok_or_else(|| AppError::new("invalid file name"))?;
     let tmp = parent.join(format!(".{file_name}.tmp"));
 
-    std::fs::write(&tmp, content.as_bytes())?;
+    std::fs::write(&tmp, content.as_bytes()).map_err(io_ctx("write the note", &abs))?;
     // rename is atomic on the same filesystem.
-    std::fs::rename(&tmp, &abs)?;
+    std::fs::rename(&tmp, &abs).map_err(io_ctx("save the note", &abs))?;
     Ok(())
 }
 

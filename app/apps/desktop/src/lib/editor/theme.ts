@@ -153,6 +153,48 @@ export const editorThemeSpec: Record<string, Record<string, string>> = {
     height: "auto",
     borderRadius: "var(--radius-sm)",
   },
+  // ```mermaid fences drawn as diagrams off the active line (./mermaid).
+  // Block widget: vertical spacing as PADDING, like `.cm-md-html` — CM6
+  // measures a block widget with getBoundingClientRect, which does not see
+  // margins. The horizontal inset comes from `.cm-block-inset`.
+  ".cm-md-mermaid": {
+    paddingBlock: "var(--sp-3)",
+    display: "block",
+    textAlign: "center",
+    overflowX: "auto",
+    /**
+     * Load-bearing, not cosmetic. `contain: paint` makes this host the
+     * containing block for any `position: fixed`/`absolute` descendant, so CSS
+     * that reached the diagram's `<style>` through a `%%{init: {themeCSS}}%%`
+     * directive — in a synced vault, a teammate's CSS — cannot build a
+     * full-window overlay. The other half of that defence is the `secure` list
+     * in mermaid/renderer.ts. Do not remove either as "dead config".
+     */
+    contain: "paint",
+  },
+  ".cm-md-mermaid svg": {
+    maxWidth: "100%",
+    height: "auto",
+  },
+  // A re-render is in flight: dim the PREVIOUS diagram rather than dropping it,
+  // so a half-typed edit (or a teammate typing in the block) never blanks.
+  ".cm-md-mermaid[data-pending] svg": {
+    opacity: "0.6",
+    transition: "opacity var(--t-fast) var(--ease)",
+  },
+  ".cm-md-mermaid-placeholder": {
+    color: "var(--text-tertiary)",
+    fontSize: "var(--fs-sm)",
+  },
+  // "Diagram error: …" — the quiet hint voice, under the last good render.
+  ".cm-md-mermaid-error": {
+    marginTop: "var(--sp-1)",
+    paddingLeft: "var(--sp-2)",
+    borderLeft: "3px solid var(--border)",
+    textAlign: "left",
+    color: "var(--text-tertiary)",
+    fontSize: "var(--fs-xs)",
+  },
   // Markdown `![alt](src)` images rendered inline.
   ".cm-md-img": {
     maxWidth: "100%",

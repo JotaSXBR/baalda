@@ -6,8 +6,9 @@
 // visible and faint — you should always be able to see and edit what a fence
 // claims to be).
 //
-// `html` fences are skipped: live preview replaces those with a rendered
-// preview, so a copy button would be attached to a line that is not on screen.
+// Rendered fences (`html`, `mermaid` — see ./fenceKind, the one authority) are
+// skipped: live preview replaces those with a rendered preview or a diagram, so
+// a copy button would be attached to a line that is not on screen.
 //
 // Positioning is `position: absolute` against the line box (theme.ts gives
 // `.cm-line` `position: relative`), pinned to the right edge of the prose
@@ -25,12 +26,10 @@ import {
   WidgetType,
 } from "@codemirror/view";
 import { copyText } from "../clipboard";
+import { fenceRenderKind } from "./fenceKind";
 
 /** How long the button says "Copied" before going back to "Copy". */
 const COPIED_MS = 1200;
-
-/** Fences whose content is rendered instead of shown (see livePreview.ts). */
-const RENDERED = new Set(["html", "htm"]);
 
 class FenceFlairWidget extends WidgetType {
   constructor(readonly code: string) {
@@ -81,8 +80,8 @@ function buildFlair(view: EditorView): DecorationSet {
       enter: (node) => {
         if (node.name !== "FencedCode") return;
         const info = node.node.getChild("CodeInfo");
-        const lang = info ? doc.sliceString(info.from, info.to).trim().toLowerCase() : "";
-        if (RENDERED.has(lang)) return false;
+        // Rendered instead of shown (see livePreview.ts) → no button.
+        if (fenceRenderKind(info ? doc.sliceString(info.from, info.to) : "")) return false;
         const body = node.node.getChild("CodeText");
         const code = body ? doc.sliceString(body.from, body.to) : "";
         if (!code.trim()) return false;

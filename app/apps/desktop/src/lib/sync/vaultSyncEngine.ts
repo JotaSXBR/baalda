@@ -97,6 +97,16 @@ export interface VaultSyncEngineOptions {
   /** Defaults to `deriveVaultWsUrl(api base)`. */
   wsUrl?: string;
   onStatus?: (status: VaultSyncStatus) => void;
+  /**
+   * The vault token mint came back **401**: the server refused the SESSION, not
+   * this vault (that is the 403 above, which stops the retry ladder). Fired on
+   * every connect attempt that hits it — including the reconnects a `reauth`
+   * triggers — and coalesced by the guard on the other end (`sessionGuard.ts`).
+   * The engine's own behaviour is unchanged: 401 stays transient and it keeps
+   * retrying, because a session check may yet say the token was merely racing a
+   * server restart.
+   */
+  onSessionRejected?: () => void;
   /** Fired when the server signals an ACL change in this vault (`reauth`). The
    *  open note syncs over its own socket, not this feed, so the owner re-mints
    *  that doc's token to pick up a view↔edit / lock change in realtime. */
@@ -265,6 +275,7 @@ export class VaultSyncEngine {
   private readonly sink: DocUpdateSink;
   private readonly wsUrl: string;
   private readonly onStatus?: (s: VaultSyncStatus) => void;
+  private readonly onSessionRejected?: () => void;
   private readonly onAclChanged?: () => void;
   private readonly onRegistryChanged?: () => void;
   private readonly onMemberJoined?: (name: string) => void;
@@ -344,6 +355,7 @@ export class VaultSyncEngine {
     this.sink = opts.sink;
     this.wsUrl = opts.wsUrl ?? deriveVaultWsUrl(this.api.getBaseUrl());
     this.onStatus = opts.onStatus;
+    this.onSessionRejected = opts.onSessionRejected;
     this.onAclChanged = opts.onAclChanged;
     this.onRegistryChanged = opts.onRegistryChanged;
     this.onMemberJoined = opts.onMemberJoined;
@@ -570,6 +582,12 @@ export class VaultSyncEngine {
         this.closeSocket();
         return;
       }
+      // 401 is the other refusal: the SESSION, not this vault. The channel is
+      // often the first thing to notice one that lapsed mid-run — it re-mints on
+      // every reconnect, with no open note required — so it must reach the same
+      // guard the per-note providers do, or a signed-out app with no note open
+      // would keep reconnecting in silence.
+      if (err instanceof ApiError && err.status === 401) this.onSessionRejected?.();
       this.onDisconnect(); // transient — reconnect
       return;
     }

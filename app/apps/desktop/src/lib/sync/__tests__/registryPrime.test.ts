@@ -119,6 +119,33 @@ describe("VaultRegistry.primeLocal", () => {
     expect(api.listFolderRegistry).not.toHaveBeenCalled();
   });
 
+  it("heals a config that already carries a duplicate path alias (#129)", async () => {
+    // Configs written by builds with the alias bug carry TWO paths for one
+    // docId, and `configSnapshot` round-trips whatever it is handed — so without
+    // a dedupe on the way in, an alias minted once survives every relaunch even
+    // after the bug that minted it is gone. One path per identity, last entry
+    // wins: the stale path was already in the map when the canonical one arrived
+    // from the server listing, so the later key is the one the server agreed
+    // with.
+    const api = fakeApi();
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(
+      config({ docs: { "Old/a.md": "n1", "a.md": "n1", "Sub/b.md": "n2" } }),
+    );
+    const reg = new VaultRegistry(api);
+
+    expect(await reg.primeLocal(ORG)).toBe(true);
+
+    expect(reg.getMapping("Old/a.md")).toBeNull();
+    expect(reg.getMapping("a.md")).toEqual({ vaultId: COLLECTION, docId: "n1" });
+    // …and the two maps agree, which is what the badge, the upload work list and
+    // the bridge's egest target are all read from.
+    expect(reg.pathForDocId("n1")).toBe("a.md");
+    expect(reg.mappedNotes()).toEqual([
+      { docId: "n1", relPath: "a.md" },
+      { docId: "n2", relPath: "Sub/b.md" },
+    ]);
+  });
+
   it("refuses a legacy config with no organizationId stamp", async () => {
     // A pre-stamp config proves nothing about WHOSE folder this is, and the
     // whole safety of priming rests on that proof. The reconcile still adopts

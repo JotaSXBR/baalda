@@ -53,6 +53,97 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **A signed-out synced vault looked exactly like a healthy one** (#145, part 1).
+  The vault opened, notes rendered, edits were accepted, and the only hint was
+  the corner pill — which a user missed for days while external edits and
+  server-side MCP edits diverged, then merged as interleaved text on re-auth.
+  A full-width `NotSyncingBanner` now sits across the top of the note pane
+  (under the main header, above the editor) whenever the open folder is a
+  SYNCED vault (`openFolderIsSynced`, the folder's own `.context/config.json`
+  stamp, so it answers while signed out) and either `authStatus` is not
+  `signed-in` / there is no session — "Signed out — your changes are not
+  syncing" with a Sign in button that opens the existing auth card — or a note
+  is open with `syncStatus === "no-access"`. It stays silent while auth is
+  still loading, for local vaults, and for plain offline/reconnecting, which
+  the pill owns. The shared `Banner` slot moved out of `App.tsx` into
+  `components/Banner.tsx` so all four banners are literally one component. The
+  banner also fires when the session lapses MID-RUN, which is the reporter's
+  actual case: a 401 at any token mint (per-doc provider, the 60 s pre-expiry
+  refresh, the vault channel's connect/reauth) reaches one
+  `SessionRejectionGuard` (`lib/sync/sessionGuard.ts`) that coalesces the burst,
+  re-checks the session with `GET /api/auth/get-session`, and only on "gone"
+  flips the store to `signed-out` (vault stays open, editor keeps working, sync
+  stops minting) and drops the keychain token; a transient 401 with a still-valid
+  session changes nothing. The reporter's second ask — conflict copies instead
+  of character-level merges on re-auth — is not part of this change.
+- **The session token never survived a restart on Windows or Linux.** keyring 3
+  has no default credential store: only `apple-native` was enabled in
+  `src-tauri/Cargo.toml`, so every other platform silently fell back to the
+  crate's in-memory mock and the app started signed out on every launch (#136,
+  and the Linux half of #129). `windows-native` (Credential Manager) and
+  `sync-secret-service` + `crypto-rust` (D-Bus Secret Service, the only Linux
+  store that outlives a reboot) are now on; both release workflows install
+  `libdbus-1-dev` for it. `keychain.rs` asks the built store for its
+  persistence at first use and logs an error if a future feature edit ever
+  reinstates the mock, and a unit test pins the feature list.
+- **A note materialized from the server carried two identities for life.**
+  `writeNoteIfMissing` let Rust's indexer mint a fresh `notes.id` for the new
+  file and nothing rebound it to the server's `doc_id`, so `Editor.tsx` keyed
+  its bridge by the index id while `DocSync` keyed by the registry id — two
+  `Y.Doc`s, two local CRDT logs, one `.md` (6,469 of 6,496 notes in one joined
+  vault; a 286 MB `index.sqlite`). The materialize step now calls
+  `ipc.rebindNoteId` right after the file is created and before anything can
+  open it (#147). Forward fix only: vaults forked by older builds are not
+  repaired here.
+- **Two paths for one note pinned the header at "Syncing 0/N" forever.**
+  `POST /api/notes` with a `doc_id` the vault already holds at another path is
+  an idempotent no-op that echoes the canonical `rel_path`; the bulk
+  create-missing-notes pool ignored the echo and mapped the LOCAL path to that
+  id, so `byPath` carried two keys for one identity, `byDocId` pointed at the
+  stale copy, both were persisted to `.context/config.json`, and every pull
+  re-registered the alias (resetting the `registering` counter to 0/N) while the
+  canonical file lost its badge (#129, client half; the server's reauth loop was
+  #140). The pool now refuses to map a path the server says is a duplicate,
+  records it once as "already registered at <path>" and remembers it so the pull
+  stops asking; `setMapping` enforces one path per `doc_id`; config load dedupes
+  aliases minted by older builds; pruning an alias no longer deletes the
+  canonical path's reverse entry; and `planInbound` refuses a rename onto a path
+  another local note already occupies instead of planning one Rust rejects on
+  every pass. The stale file is left on disk, unmapped.
+- **An external edit merged by `hydrate`'s debounced ingest could be marked
+  synced without ever leaving the device.** `NoteBridge.hydrate` arms a 150 ms
+  ingest to reconcile a file that moved on while the doc was closed; if it fired
+  while `ContentUploader.pushOne` was still awaiting its own `readFile`, the
+  uploader's `ingestNow()` found the file already merged, answered `false`, and
+  the no-socket fast path called `markPushed`. The bridge now remembers a disk
+  merge no `ingestNow()` caller has been told about and reports it on the next
+  call (#104). The write shapes themselves (`>`, `>>`, create) were never
+  distinguishable — verified with a real FSEvents probe — and the reporter's
+  "never arrives" was `notes.updated_at`, which the server stamped at most once
+  a minute per editor; the row is now stamped on EVERY stored edit and only the
+  vault-wide `registry-changed` broadcast stays throttled. `runLocalChangePush`
+  also re-queues its batch when a newer run supersedes it.
+- **A Windows join failed with a bare "The system cannot find the file
+  specified. (os error 2)" on both folder-setup buttons.** `AppError`'s blanket
+  `From<io::Error>` dropped the operation and the path, so three different
+  `create_dir_all`/`write` calls on the vault-open path produced the same
+  message (#128). `error::io_ctx(op, path)` now renders "Couldn't create the
+  folder <path>: <os error>" and logs it; every I/O call on that path uses it.
+  Release builds write a rotating log file (`LogDir`, 2 MB, keep one:
+  `~/Library/Logs/com.baalda.context/baalda.log`,
+  `%LOCALAPPDATA%\com.baalda.context\logs\baalda.log`). `config_path` probes
+  the app config dir for writability and falls back to `app_local_data_dir`
+  when a redirected or offline roaming profile refuses it.
+- **A teammate who joined a vault never showed up on the owner's sidebar.**
+  Presence was the one caller that fell back to the LOCAL index id when the
+  registry had no mapping yet (a note opened while the post-join reconcile was
+  still running), the server dropped the unreadable id silently, and the value
+  was cached and replayed on every reconnect for the rest of the session (#125).
+  `setViewing` now records the PATH; the doc id is resolved through the registry
+  at every send, re-announced (coalesced, only when the resolved id changed)
+  when the map changes, and the fallback is `null`, never a local id. Presence
+  and the sidebar's `peersForNode` resolve paths case-insensitively via
+  `getMappingCi`, and a frame for an unmapped path warns once per session.
 - **Switching between two locked notes took the whole app down to a blank
   window.** `ReactWidget.toDOM`/`updateDOM` call `flushSync` from inside a
   CodeMirror DOM update (deliberately — it is what makes CM6 measure a widget's
@@ -353,6 +444,29 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **"Remember email address" on the sign-in dialog** (#120). A `Switch` under the
+  password field; when on, the address used at the last SUCCESSFUL sign-in
+  prefills the field next time (invitation address still outranks it). Only the
+  email is stored — `lib/rememberedEmail.ts`, two `localStorage` keys wrapped
+  in try/catch like the other prefs; turning the switch off removes both at
+  once, so unticking forgets immediately even if the dialog is then closed. The
+  switch opens on its last state.
+- **Mermaid diagrams.** A ```` ```mermaid ```` fence renders as a diagram in live
+  preview; the caret inside the block reveals the source, like every other block
+  widget (#132). `mermaid` 11.17 is loaded with one memoised dynamic `import()`
+  the first time a note contains a diagram — the entry chunk grew by 88 bytes;
+  the ~700 kB core plus one ~60 kB chunk per diagram type are fetched lazily and
+  deliberately kept out of `prefetch.ts`. It runs at `securityLevel: "strict"`
+  with `htmlLabels: false`, `suppressErrorRendering`, and the theme/CSS keys
+  locked against `%%{init}%%` directives; the output goes through a mermaid-only
+  scrubber (`editor/mermaid/sanitize.ts` — drops `script`/`iframe`/`on*`/
+  `javascript:`, keeps the `<style>` and `style=` that ARE the diagram, which
+  the note-HTML sanitizer would strip). Renders are validated with
+  `mermaid.parse` first, debounced 300 ms, LRU-cached by source, and a failed
+  render shows an inline error strip under the last good diagram instead of
+  throwing into the editor. The slash menu gained a "Diagram" block.
+  `fenceRenderKind` is now the single authority for which fences render
+  (`livePreview.ts` and `codeFence.ts`).
 - **A Coolify deploy path for self-hosters** (`deploy/coolify/`, contributed by
   [@JotaSXBR](https://github.com/JotaSXBR), #135, closes #97). Coolify — and any
   PaaS that runs `docker compose` with the REPO ROOT as the project directory —
