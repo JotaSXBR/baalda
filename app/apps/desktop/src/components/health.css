@@ -1,0 +1,612 @@
+/* Vault Settings → Health.
+   Loaded by `HealthTab.tsx` the way `graph.css` is loaded by `GraphView.tsx`,
+   so the whole page ships in the lazy settings chunk and costs nothing until
+   someone opens it.
+
+   Every colour comes from `styles/tokens.css`. The page has exactly one colour
+   idea: a row, a node, a bar segment or a badge declares `data-tone`, and the
+   two variables below resolve to the semantic pair for that tone. Both themes
+   then follow for free — there is no second palette to keep in step. */
+
+.health-tab {
+  --tone: var(--text-tertiary);
+  --tone-soft: var(--bg-active);
+  display: block;
+}
+
+/* The one tone table. `busy` borrows the accent because motion is the accent's
+   job everywhere else in the app (progress pills, live cursors); `muted` is the
+   deliberate absence of a verdict, not a grey failure. */
+.health-tab [data-tone="good"] {
+  --tone: var(--success);
+  --tone-soft: var(--success-soft);
+}
+.health-tab [data-tone="warn"] {
+  --tone: var(--warning);
+  --tone-soft: var(--warning-soft);
+}
+.health-tab [data-tone="bad"] {
+  --tone: var(--danger);
+  --tone-soft: var(--danger-soft);
+}
+.health-tab [data-tone="busy"] {
+  --tone: var(--accent);
+  --tone-soft: var(--accent-soft);
+}
+.health-tab [data-tone="muted"] {
+  --tone: var(--text-tertiary);
+  --tone-soft: var(--bg-active);
+}
+
+/* A pipeline stage's state maps onto the same two variables, so a node, its
+   edge and the legend under it cannot disagree about what colour "warn" is. */
+.health-tab [data-state="ok"] {
+  --tone: var(--success);
+  --tone-soft: var(--success-soft);
+}
+.health-tab [data-state="busy"] {
+  --tone: var(--accent);
+  --tone-soft: var(--accent-soft);
+}
+.health-tab [data-state="warn"] {
+  --tone: var(--warning);
+  --tone-soft: var(--warning-soft);
+}
+.health-tab [data-state="error"] {
+  --tone: var(--danger);
+  --tone-soft: var(--danger-soft);
+}
+.health-tab [data-state="off"] {
+  --tone: var(--text-tertiary);
+  --tone-soft: var(--bg-subtle);
+}
+
+/* The settings card sets one vertical rhythm for every tab, but its rules reach
+   only DIRECT children of `.settings-content` (plus `.versioning-tab`, the other
+   tab that wraps itself in a div). This tab wraps too, so it restates the same
+   three margins here rather than reaching into `App.css` — same values, so the
+   sections line up with every other tab's. */
+.health-tab > .subhead {
+  margin: var(--sp-8) 0 var(--sp-3);
+}
+.health-tab > .subhead:first-child {
+  margin-top: 0;
+}
+.health-tab > .subhead + .muted,
+.health-tab > .subhead + .health-local-row {
+  margin-bottom: var(--sp-3);
+}
+
+/* ── Verdict card ─────────────────────────────────────────────────────────── */
+
+.health-verdict {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+  padding: var(--sp-5);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(135deg, var(--tone-soft), transparent 72%);
+  border: 1px solid var(--border);
+}
+.health-verdict-main {
+  min-width: 0;
+  flex: 1 1 320px;
+}
+.health-pill {
+  display: inline-block;
+  padding: 2px var(--sp-3);
+  border-radius: var(--radius-pill);
+  background: var(--tone-soft);
+  color: var(--tone);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.health-headline {
+  margin: var(--sp-2) 0 var(--sp-1);
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.health-detail {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.health-verdict-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* ── Pipeline diagram ─────────────────────────────────────────────────────── */
+
+.health-pipeline-wrap {
+  margin-top: var(--sp-5);
+  /* Stacking is driven by the CARD's width, not the window's: the settings
+     content column is what the diagram has to fit inside. The media query
+     below is the fallback for a webview without container queries. */
+  container-type: inline-size;
+}
+.health-pipeline {
+  display: flex;
+  align-items: stretch;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.health-stage-cell {
+  display: flex;
+  align-items: center;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.health-node {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease);
+}
+.health-node:hover {
+  background: var(--bg-hover);
+}
+.health-node:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.health-node[data-focus],
+.health-node[data-picked] {
+  border-color: var(--tone);
+}
+.health-node[data-focus] {
+  background: var(--tone-soft);
+}
+.health-node-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--tone);
+}
+.health-node[data-state="off"] .health-node-dot {
+  background: transparent;
+  border: 1px solid var(--tone);
+}
+.health-node-label {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.health-node-headline {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* The edge into a node. Solid hairline by default; the one into the first
+   unsettled stage turns dashed and takes that stage's colour, which is the
+   whole diagnosis in one mark. */
+.health-edge {
+  flex: 0 0 20px;
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+}
+.health-edge[data-broken] {
+  background-image: repeating-linear-gradient(
+    90deg,
+    var(--tone) 0 6px,
+    transparent 6px 12px
+  );
+  background-color: transparent;
+  background-size: 12px 2px;
+}
+.health-edge[data-broken][data-state="busy"] {
+  animation: health-dash 700ms linear infinite;
+}
+@keyframes health-dash {
+  to {
+    background-position-x: 12px;
+  }
+}
+
+.health-legend {
+  margin: var(--sp-3) 0 0;
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--tone);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.health-legend strong {
+  color: var(--text-primary);
+  margin-right: var(--sp-1);
+}
+
+/* Narrow card (or narrow window): the five stages become a column and the
+   edges turn vertical. */
+@container (max-width: 520px) {
+  .health-pipeline {
+    flex-direction: column;
+  }
+  .health-stage-cell {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .health-edge {
+    flex: 0 0 16px;
+    width: 2px;
+    height: 16px;
+    margin-left: var(--sp-5);
+  }
+  .health-edge[data-broken] {
+    background-image: repeating-linear-gradient(
+      180deg,
+      var(--tone) 0 6px,
+      transparent 6px 12px
+    );
+    background-size: 2px 12px;
+  }
+  .health-edge[data-broken][data-state="busy"] {
+    animation-name: health-dash-y;
+  }
+}
+@media (max-width: 760px) {
+  .health-pipeline {
+    flex-direction: column;
+  }
+  .health-stage-cell {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .health-edge {
+    flex: 0 0 16px;
+    width: 2px;
+    height: 16px;
+    margin-left: var(--sp-5);
+  }
+  .health-edge[data-broken] {
+    background-image: repeating-linear-gradient(
+      180deg,
+      var(--tone) 0 6px,
+      transparent 6px 12px
+    );
+    background-size: 2px 12px;
+  }
+  .health-edge[data-broken][data-state="busy"] {
+    animation-name: health-dash-y;
+  }
+}
+@keyframes health-dash-y {
+  to {
+    background-position-y: 12px;
+  }
+}
+
+/* ── Sync breakdown ───────────────────────────────────────────────────────── */
+
+.health-local-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.health-breakdown {
+  display: block;
+}
+.health-bar {
+  display: flex;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  background: var(--bg-subtle);
+}
+.health-bar-seg {
+  background: var(--tone);
+  min-width: 2px;
+}
+.health-bar-caption {
+  margin: var(--sp-2) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+.health-legend-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.health-legend-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.health-legend-list strong {
+  color: var(--text-primary);
+}
+.health-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--tone);
+}
+
+/* ── Issues ───────────────────────────────────────────────────────────────── */
+
+.health-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--success);
+  font-size: var(--fs-sm);
+  padding: var(--sp-2) 0;
+}
+.health-chips {
+  display: flex;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.health-chip {
+  padding: 3px var(--sp-3);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
+}
+.health-chip:hover {
+  background: var(--bg-hover);
+}
+.health-chip.active {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.health-issues {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.health-issue {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0;
+}
+.health-issue + .health-issue {
+  border-top: 1px solid var(--border);
+}
+.health-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--warning);
+}
+.health-dot[data-severity="error"] {
+  background: var(--danger);
+}
+.health-issue-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.health-issue-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.health-path {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.health-why {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+}
+.health-issue-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* ── Stat tiles ───────────────────────────────────────────────────────────── */
+
+.health-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--sp-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.health-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+}
+.health-tile-value {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: var(--lh-tight);
+}
+.health-tile-label {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.health-tile-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.health-tile-action {
+  align-self: flex-start;
+  margin-top: var(--sp-2);
+}
+/* The census is one Rust pass, so the wait is short — the placeholder only has
+   to hold the grid's shape, not entertain. */
+.health-tile.is-skeleton .health-tile-value,
+.health-tile.is-skeleton .health-tile-label {
+  display: block;
+  background: var(--bg-active);
+  border-radius: var(--radius-sm);
+  animation: health-pulse 1.4s var(--ease) infinite;
+}
+.health-tile.is-skeleton .health-tile-value {
+  width: 60%;
+  height: 22px;
+}
+.health-tile.is-skeleton .health-tile-label {
+  width: 45%;
+  height: 12px;
+  margin-top: var(--sp-1);
+}
+@keyframes health-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* ── Activity ─────────────────────────────────────────────────────────────── */
+
+.health-activity {
+  display: block;
+}
+.health-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  height: 72px;
+  padding: 0 2px;
+}
+.health-week {
+  flex: 1 1 0;
+  min-width: 4px;
+  border-radius: var(--radius-sm) var(--radius-sm) 2px 2px;
+  background: var(--accent-soft);
+}
+.health-week[data-current] {
+  background: var(--accent);
+}
+.health-activity .health-detail {
+  margin-top: var(--sp-2);
+}
+
+/* ── Largest tables ───────────────────────────────────────────────────────── */
+
+.health-largest {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+}
+.health-table-title {
+  margin: 0 0 var(--sp-2);
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.health-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+  table-layout: fixed;
+}
+.health-table th {
+  text-align: left;
+  font-weight: 500;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+}
+.health-table td {
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  vertical-align: top;
+}
+.health-table tr:last-child td {
+  border-bottom: none;
+}
+.health-table .health-num {
+  text-align: right;
+  white-space: nowrap;
+  width: 7.5rem;
+}
+.health-file-name {
+  display: block;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.health-path {
+  display: block;
+}
+.health-row-actions {
+  width: 9.5rem;
+  text-align: right;
+  white-space: nowrap;
+}
+.health-size-badge {
+  display: block;
+  font-size: var(--fs-xs);
+  color: var(--tone);
+}
+
+/* Motion is decoration everywhere on this page: the dashes say where the
+   pipeline stops, and the colour already said it. */
+@media (prefers-reduced-motion: reduce) {
+  .health-edge,
+  .health-tile.is-skeleton .health-tile-value,
+  .health-tile.is-skeleton .health-tile-label {
+    animation: none;
+  }
+}

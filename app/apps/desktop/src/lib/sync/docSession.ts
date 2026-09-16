@@ -2265,6 +2265,48 @@ export class SyncManager implements InboundHost {
   }
 
   /**
+   * Re-queue ONE note's content, from the Health page's per-row Retry.
+   *
+   * The three pieces of state that would otherwise make the retry a no-op, in
+   * the order they'd bite:
+   *
+   *   1. `permanentFailures` — a doc in here is deliberately skipped by every
+   *      later `ready`, so it must be forgotten before anything else runs.
+   *      (A doc that is STILL over the cap simply fails again, permanently, and
+   *      lands back in the map — which is the honest outcome, not a loop: the
+   *      re-fail costs one encode and opens no socket.)
+   *   2. `registry.isPushed` — the durable "the server has this note's content"
+   *      checkpoint. A believed-pushed doc is not in any work list, so the retry
+   *      has to withdraw the claim rather than trust it.
+   *   3. `divergedDocs` — forces a real connect (`mustConnect`) instead of the
+   *      echo-guarded fast path, because we cannot know whether the local ops
+   *      ever reached the server.
+   *
+   * It then joins the SAME queue an external writer's file change uses
+   * (`localChanges` + the debounced drain), which runs the uploader with `force`
+   * and `ingestFromFile` — exactly the pass this note needs. Deliberately not a
+   * whole `retrySync()`: one row's Retry must not re-pull the registry and
+   * re-walk a 5,000-note vault.
+   *
+   * Scope-guarded like everything else here: a vault switch between the click
+   * and the drain drops the work silently rather than pushing into the new vault.
+   */
+  async retryDoc(docId: string): Promise<void> {
+    const scope = this.scope;
+    if (!this.enabled || !scope || !scope.isCurrent()) return;
+    const relPath = this.registry.pathForDocId(docId);
+    if (!relPath) return;
+    this.permanentFailures.delete(docId);
+    this.registry.unmarkPushed(docId);
+    this.divergedDocs.add(docId);
+    // A `ready.empty` verdict for this doc would otherwise short-circuit the
+    // push before it opens a socket; the user just told us to try again.
+    this.emptyEverywhere.delete(docId);
+    this.localChanges.set(docId, relPath);
+    this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
+  }
+
+  /**
    * User-triggered "sync now": re-pull the registry and re-run the content pass,
    * so notes stranded by a transient failure get another chance without a
    * sign-out/relaunch. Backs the sync pill's retry button.
@@ -2491,7 +2533,11 @@ export class SyncManager implements InboundHost {
   /** Everything the current run could not sync — registry rows and note content. */
   syncFailures(): {
     registry: ReturnType<VaultRegistry["failures"]>;
-    content: Array<{ docId: string; relPath: string; reason: string }>;
+    // `permanent` is carried through (it is already on every `UploadFailure`)
+    // because a caller cannot otherwise tell "retry may fix this" from "the note
+    // is over the cap and retrying is pointless" — the Health page's whole
+    // reason for offering different remedies to the two.
+    content: Array<{ docId: string; relPath: string; reason: string; permanent?: boolean }>;
     limitCode: string | null;
   } {
     // Permanent failures are remembered across runs (see the field), so they are
@@ -2500,7 +2546,14 @@ export class SyncManager implements InboundHost {
     const content = [...this.permanentFailures.values()];
     const seen = new Set(content.map((f) => f.docId));
     for (const f of this.uploader?.failedDocs() ?? []) {
-      if (!seen.has(f.docId)) content.push(f);
+      if (seen.has(f.docId)) continue;
+      // A doc sitting in the local-change queue is being pushed again right now
+      // (an external write, or the Health page's Retry). The failure still in the
+      // PREVIOUS run's uploader describes an attempt that has been superseded, so
+      // reporting it would leave a row the user just retried looking broken until
+      // the next run happened to replace the uploader.
+      if (this.localChanges.has(f.docId)) continue;
+      content.push(f);
     }
     return {
       registry: this.registry.failures(),

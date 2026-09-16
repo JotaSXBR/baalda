@@ -36,6 +36,7 @@ import { SyncBadge } from "./Identity";
 import { AccessPanel } from "./AccessPanel";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { HealthTab } from "./HealthTab";
 import { canActOnMember } from "./memberRoles";
 import { RoleSelect } from "./RoleSelect";
 // Static, not via ./Face: this module is itself a lazy chunk, so it pays for
@@ -50,6 +51,7 @@ import { useKnownOrgIds, useLocalVaults } from "./useVaultLists";
 
 export type SettingsTab =
   | "general"
+  | "health"
   | "vaults"
   | "members"
   | "billing"
@@ -83,6 +85,19 @@ const GENERAL_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
     <MenuIcon>
       <circle cx="12" cy="12" r="3" />
       <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+    </MenuIcon>
+  ),
+};
+
+/** Health: what is synced, what is not and why, plus the vault's own numbers.
+   Deliberately NOT a team tab — a local folder has no server to report on, but
+   the pipeline's first three stages and every analytic below still apply. */
+const HEALTH_TAB: { id: SettingsTab; label: string; icon: React.ReactNode } = {
+  id: "health",
+  label: "Health",
+  icon: (
+    <MenuIcon>
+      <path d="M3 12h4l2-6 4 12 2-6h6" />
     </MenuIcon>
   ),
 };
@@ -225,7 +240,7 @@ export function VaultSettingsDialog({
   // are local folders to list — that's what "View all" opens into.
   const showVaults = !!session || locals.length > 0;
   const tabs = useMemo(() => {
-    const out = [GENERAL_TAB];
+    const out = [GENERAL_TAB, HEALTH_TAB];
     if (showVaults) out.push(...SETTINGS_TABS);
     else out.push(...SETTINGS_TABS.filter((t) => t.id !== "vaults"));
     if (billingEnabled) {
@@ -300,6 +315,12 @@ export function VaultSettingsDialog({
               canManage={canManage}
               activeOrgName={activeOrg?.name ?? null}
               onRequestSignIn={onRequestSignIn}
+            />
+          ) : tab === "health" ? (
+            <HealthTab
+              onRequestSignIn={onRequestSignIn}
+              onGoToGeneral={() => setTab("general")}
+              onClose={onClose}
             />
           ) : lockedTab ? (
             <SyncGate label={activeTab.label} onGoToSync={() => setTab("general")} />

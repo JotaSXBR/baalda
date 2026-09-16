@@ -12,6 +12,7 @@ pub mod notefile;
 pub mod oauth;
 pub mod parse;
 mod state;
+pub mod stats;
 pub mod tree;
 pub mod vault;
 mod watcher;
@@ -180,6 +181,7 @@ pub fn run() {
             commands::read_binary_file,
             commands::write_binary_file,
             commands::list_attachments,
+            commands::vault_stats,
             commands::read_external_file,
             commands::get_server_url,
             commands::set_server_url,

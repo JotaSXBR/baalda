@@ -444,6 +444,29 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **Vault Settings → Health.** One page for "what is synced, what is not, why, and
+  what is in this vault". A verdict card (`local` / `signed-out` / `no-access` /
+  `offline` / `connecting` / `syncing` / `attention` / `healthy`, most urgent
+  first) with Sync now, Refresh and Copy diagnostics; a five-stage pipeline
+  diagram (files on disk → local index → local history → connection → server)
+  that highlights the first degraded edge; a stacked synced/pending/failed/not-
+  on-server bar built from the SAME `buildTreeSyncIndex` roll-up as the sidebar
+  dots (so the two can never disagree); a Needs-attention list mapping every
+  `syncFailures()` entry — too-large (permanent), transient upload failures,
+  registry failures, plan limits, left-behind files, unregistered notes, orphan
+  CRDT history — to a plain-language cause and per-row remedies (Retry, Open,
+  Reveal, Reset history, Delete, Upgrade, Reclaim); and vault analytics from a new
+  Rust `vault_stats` command (one walk under the tree's ignore rules + aggregate
+  SQLite queries: notes/folders/attachments/other files with bytes, tags, resolved
+  and broken links, index size, CRDT history size and orphans, the ten largest
+  notes and files, the ten heaviest histories, and a 12-week modified-notes
+  strip). New: `SyncManager.retryDoc(docId)` re-queues ONE note through the
+  external-writer path (forgets its permanent failure, `unmarkPushed`, forces a
+  connect) instead of re-pulling the whole registry; `syncFailures()` now carries
+  `permanent` and hides a superseded failure for a doc already back in the
+  local-change queue. Pure model in `lib/health/model.ts` (38 tests), Rust census
+  in `src-tauri/src/stats.rs` (9 tests). Not a team tab: local vaults get the
+  first three stages and every analytic.
 - **"Remember email address" on the sign-in dialog** (#120). A `Switch` under the
   password field; when on, the address used at the last SUCCESSFUL sign-in
   prefills the field next time (invitation address still outranks it). Only the

@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { decodeStateVectors, decodeYjsState, frame, type YjsState } from "./ipcCodec";
+import type { VaultStats } from "./health/types";
 
 // The binary commands (CRDT state, attachment bytes) speak raw bytes, framed by
 // `ipcCodec.ts` — see that module for why and for the frame layouts.
@@ -545,6 +546,23 @@ export const writeBinaryFile = (
 
 export const listAttachments = (expectedEpoch?: VaultEpoch) =>
   invoke<AttachmentMeta[]>("list_attachments", { expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * A one-shot census of the open vault for Vault Settings → Health: counts and
+ * bytes for notes/folders/attachments/other files, the biggest of each, the
+ * local CRDT store (orphan docs included), tag + link totals, the index file's
+ * own size, and a 12-week strip of how many notes were modified.
+ *
+ * Computed by Rust in ONE disk walk (the tree's ignore rules — `.context/`,
+ * `.git`, dotfiles) plus a few aggregate queries, reading no file contents, so
+ * it is cheap enough to recompute on demand. Never cache it across vaults: every
+ * number in it describes the vault that was open when it was taken.
+ *
+ * A file counts as a *note* exactly when the index has a `notes` row for its
+ * path; `mtime` values are milliseconds since the epoch.
+ */
+export const vaultStats = (expectedEpoch?: VaultEpoch) =>
+  invoke<VaultStats>("vault_stats", { expectedEpoch: expectedEpoch ?? null });
 
 /** Read a dropped/picked host file by absolute path (not vault-scoped). */
 export const readExternalFile = (path: string) =>
