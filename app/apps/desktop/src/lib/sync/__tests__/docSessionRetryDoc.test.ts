@@ -439,7 +439,7 @@ describe("SyncManager.syncLog", () => {
 
     await sm.retryDoc(DOC);
     const retry = sm.syncLog().find((e) => e.event === "retry");
-    expect(retry?.message).toBe(`Retrying ${REL}`);
+    expect(retry?.message).toBe("Retrying this note");
     expect(retry?.path).toBe(REL);
     expect(seen.length).toBeGreaterThan(0);
 

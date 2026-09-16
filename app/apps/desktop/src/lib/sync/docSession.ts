@@ -2677,10 +2677,22 @@ export class SyncManager implements InboundHost {
     this.armChannelWatchdog(scope);
     // Opens at 0/0 ("Syncing…"), because this now runs the moment the engine is
     // started — before its socket is even open, let alone `hello`ed. There is
-    // deliberately no `backfillSettled()` short-circuit here any more: an engine
+    // deliberately no bare `backfillSettled()` short-circuit here: an engine
     // that has not connected yet reports settled (nothing is queued and no window
-    // is open), so checking it here would end the phase before it began.
+    // is open), so checking it alone would end the phase before it began.
     progress.phase("downloading", total - done);
+    // …but the channel can also be AHEAD of us. In the prime window it starts
+    // before the reconcile, and on a small vault its `ready` and the idle edge
+    // both land while the reconcile is still running — so the one event that
+    // ends this phase (`handleInboundIdle`) fired before the phase existed, the
+    // watchdog stands down because the channel is healthy, and the pill said
+    // "Syncing" until some teammate's keystroke happened to drain a frame. A
+    // synced channel whose backfill is settled has already delivered the edge;
+    // take it now. `vaultStatus === "synced"` is what makes the check safe: an
+    // unconnected engine never reports synced, only settled.
+    if (this.vaultStatus === "synced" && engine.backfillSettled()) {
+      this.handleInboundIdle(scope);
+    }
   }
 
   private armChannelWatchdog(scope: VaultScope): void {

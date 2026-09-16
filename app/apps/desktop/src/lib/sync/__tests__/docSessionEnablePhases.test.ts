@@ -96,7 +96,12 @@ vi.mock("../../auth/authManager", () => ({
   },
 }));
 
-const engineHooks = vi.hoisted(() => ({ started: 0, opts: null as VaultSyncEngineOptions | null }));
+const engineHooks = vi.hoisted(() => ({
+  started: 0,
+  opts: null as VaultSyncEngineOptions | null,
+  /** What the fake engine answers to `backfillSettled()`. */
+  settled: false,
+}));
 
 vi.mock("../vaultSyncEngine", () => ({
   VaultSyncEngine: class {
@@ -116,7 +121,7 @@ vi.mock("../vaultSyncEngine", () => ({
       return { done: 0, total: 0, queued: 0 };
     }
     backfillSettled() {
-      return false;
+      return engineHooks.settled;
     }
   },
 }));
@@ -235,6 +240,7 @@ beforeEach(() => {
   fakeRegistry.markPushed.mockClear();
   engineHooks.started = 0;
   engineHooks.opts = null;
+  engineHooks.settled = false;
   storeHooks.created = 0;
   storeHooks.suppressed = null;
 });
@@ -310,6 +316,40 @@ describe("SyncManager.enable — the prime window", () => {
     // Still ONE store: the reconcile adopted the channel the prime started.
     expect(storeHooks.created).toBe(1);
     expect(storeHooks.suppressed).toBe(MAPPED_DOC);
+  });
+
+  it("finishes the run when the channel settled BEFORE the reconcile returned", async () => {
+    // The channel starts in the prime window, so on a small vault its `ready`
+    // and idle edge both land while the reconcile is still running. The download
+    // phase is armed afterwards and used to wait for an edge that had already
+    // passed — the pill said "Syncing" until a stray frame drained.
+    const held = gate();
+    fakeRegistry.reconcile.mockImplementation(async () => {
+      await held.waited;
+      return { seeded: false };
+    });
+    const phases: string[] = [];
+    const sm = new SyncManager();
+    sm.setSyncProgressListener((p) => {
+      if (p) phases.push(p.phase);
+    });
+    const enabling = sm.enable(session(), {
+      orgId: "org-a",
+      name: "a",
+      path: "/vaults/a",
+      epoch: 1,
+    });
+    await flush();
+    // The channel gets ahead: `ready` lands, the backfill settles, the idle
+    // edge fires — all before the reconcile gate opens.
+    engineHooks.opts!.onStatus?.("synced");
+    engineHooks.settled = true;
+    engineHooks.opts!.onInboundIdle?.();
+
+    held.open();
+    await enabling;
+    await flush();
+    expect(phases[phases.length - 1]).toBe("done");
   });
 
   it("fires onPrimed exactly once, before the reconcile resolves", async () => {

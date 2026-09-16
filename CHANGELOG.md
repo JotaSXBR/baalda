@@ -53,6 +53,16 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **Run stuck at "Syncing" when the vault channel settled before the reconcile
+  returned.** Since the prime-window change (v0.1.60) the channel starts before
+  `registry.reconcile()`, so on a small vault its `ready` and the backfill's
+  idle edge both land while the reconcile is still running. `beginDownloadPhase`
+  then armed a phase whose only exit — `handleInboundIdle` — had already fired,
+  and the 30 s watchdog stood down because `vaultStatus` was `synced`. It now
+  takes the edge immediately when the channel is already synced AND the backfill
+  is settled (the `synced` guard keeps an unconnected engine, which also reports
+  settled, from ending the phase early). Regression test in
+  `docSessionEnablePhases.test.ts` fails against the staging copy.
 - **A signed-out synced vault looked exactly like a healthy one** (#145, part 1).
   The vault opened, notes rendered, edits were accepted, and the only hint was
   the corner pill — which a user missed for days while external edits and
