@@ -18,6 +18,47 @@ git commit -am "Release v0.2.0" && git push origin main   # ← ships
 Run `pnpm install --frozen-lockfile` from `app/` after bumping. A desynced
 lockfile fails *every* platform job at the install step, several minutes in.
 
+### Release notes (what the user actually reads)
+
+`docs/RELEASE_NOTES.md` is **per version**, newest first:
+
+```markdown
+## 0.1.61
+
+- Baalda now updates itself: it checks, downloads, installs and restarts …
+- Vault Settings has a new Health page: a verdict on your vault, …
+```
+
+The rules, and they are load-bearing:
+
+- **One `## <version>` section per release**, its heading matching
+  `tauri.conf.json`'s version exactly. Newest at the top.
+- **2–5 points per section**, each one or two sentences and ~200 characters at
+  most. Combine related changes into themes ("Sync light: …", "Editor: …").
+  Never one bullet per commit — this is the copy a user reads in a dialog, not
+  a commit log. The developer-facing detail belongs in `CHANGELOG.md`.
+- **Every staging PR adds or edits ONLY the section for the version it ships
+  in.** If that section does not exist yet, create it at the top. Do not touch
+  older sections; they are history.
+- The `<!-- … -->` header at the top of the file restates these rules and is
+  stripped before anything is published.
+
+`release.yml`'s **Release notes** step extracts only the section whose heading
+matches `needs.gate.outputs.version`, drops the heading line itself, and hands
+the points to tauri-action as the GitHub release body. That body becomes
+`latest.json`'s `notes`, which the desktop shows in the **What's New** modal on
+the first launch after an update — so a user sees the version they just got and
+nothing else. (It used to `cat` the whole file, which is why every update opened
+on a dozen bullets from releases already installed.) Two fallbacks keep a
+release shippable: an unmatched version falls back to the topmost section, and a
+missing file to a one-line placeholder. The desktop side is the backstop:
+`src/lib/releaseNotes.ts` re-selects the section for the received version and
+caps the modal at five points.
+
+`staging-release.yml` always appends the **topmost** section under its
+tester-facing warning, because the version bump only happens at promotion — the
+base version there still names the release that already shipped.
+
 ### What triggers a release, and what doesn't
 
 | Event | Releases? |

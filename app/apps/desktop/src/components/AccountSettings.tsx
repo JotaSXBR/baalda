@@ -17,7 +17,12 @@ import {
   sliderToMeasure,
 } from "../lib/editorMeasure";
 import type { PropertiesMode } from "../lib/editor/frontmatter";
-import { checkForUpdate, currentVersion, installUpdate, useUpdateState } from "../lib/updater";
+import {
+  checkAndAutoInstall,
+  currentVersion,
+  relaunchForUpdate,
+  useUpdateState,
+} from "../lib/updater";
 import { useStore } from "../store";
 import { Avatar } from "./Avatar";
 import { ContentWidthPreview } from "./ContentWidthPreview";
@@ -523,10 +528,14 @@ function AboutTab({ onClose }: { onClose: () => void }) {
     void currentVersion().then(setVersion);
   }, []);
 
+  // Updates install themselves, so this button only kicks off the same silent
+  // path the launch check and the poll use — there is no Install step to offer.
   const busy =
     update.phase === "checking" ||
+    update.phase === "available" ||
     update.phase === "downloading" ||
-    update.phase === "installing";
+    update.phase === "installing" ||
+    update.phase === "ready";
 
   let statusText: string | null = null;
   let statusError = false;
@@ -538,7 +547,7 @@ function AboutTab({ onClose }: { onClose: () => void }) {
       statusText = "You're on the latest version.";
       break;
     case "available":
-      statusText = "An update is available.";
+      statusText = `Version ${update.version} found — starting the download…`;
       break;
     case "downloading":
       statusText =
@@ -547,10 +556,17 @@ function AboutTab({ onClose }: { onClose: () => void }) {
           : `Downloading ${update.version}…`;
       break;
     case "installing":
-      statusText = `Installing ${update.version} — the app will restart…`;
+      statusText = `Installing ${update.version}…`;
+      break;
+    case "ready":
+      statusText = `Version ${update.version} is installed — restarting shortly.`;
       break;
     case "error":
       statusText = `Couldn't check for updates: ${update.message}`;
+      statusError = true;
+      break;
+    case "failed":
+      statusText = `Couldn't install version ${update.version}${update.message ? `: ${update.message}` : ""}`;
       statusError = true;
       break;
   }
@@ -567,7 +583,7 @@ function AboutTab({ onClose }: { onClose: () => void }) {
           className="primary sm update-check-btn"
           disabled={busy}
           aria-busy={busy}
-          onClick={() => void checkForUpdate()}
+          onClick={() => void checkAndAutoInstall()}
         >
           {busy && <span className="btn-spinner" aria-hidden="true" />}
           <span>Check for updates</span>
@@ -577,12 +593,12 @@ function AboutTab({ onClose }: { onClose: () => void }) {
         </span>
       </div>
 
-      {update.phase === "available" && (
-        <div className="update-detail">
-          <div className="subhead">Version {update.version} available</div>
-          {update.notes && <div className="muted release-notes">{update.notes}</div>}
-          <button className="primary sm" onClick={() => void installUpdate()}>
-            Install &amp; Restart
+      {/* The one moment worth a button: the bytes are in and we are holding the
+          restart for a pause in typing. Someone who is done can take it now. */}
+      {update.phase === "ready" && (
+        <div className="update-actions">
+          <button className="primary sm" onClick={() => void relaunchForUpdate()}>
+            Restart now
           </button>
         </div>
       )}

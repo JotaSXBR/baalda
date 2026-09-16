@@ -32,9 +32,9 @@ import {
   installUpdate,
   isUpdateBlocking,
   justUpdatedTo,
-  releaseNoteLines,
   useUpdateState,
 } from "./lib/updater";
+import { notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { previewKind } from "./lib/preview";
 import { editorMeasureStyle } from "./lib/editorMeasure";
@@ -378,32 +378,34 @@ function VaultFolderPrompt() {
 }
 
 /**
- * Full-screen REQUIRED-update wall. Updates are not optional: the moment a
- * newer version is discovered (at launch or by the background poll) this covers
- * the whole window and the only way forward is "Install & Restart". No "Later".
+ * Full-screen REQUIRED-update wall — the FALLBACK path, not the normal one.
  *
- * Why a wall and not a bar: every dismissible banner left part of the fleet on
- * old builds, and old builds are exactly where the bugs we just fixed live —
- * one stale client can resurrect deleted folders for a whole team. Keeping
- * everyone on the latest version is a correctness feature here, not a nag.
+ * Updates install themselves: a newer version found at launch or by the poll is
+ * downloaded, installed and restarted into silently, and this component never
+ * renders. It appears only once the silent path has spent both its attempts
+ * (`failed`), when the app is knowingly stale and needs the user to fix a
+ * network before it can heal itself.
  *
- * The version is LATCHED: once `available` has been seen, an install error
- * keeps the wall up with a retry rather than letting a known-stale build back
- * in. A failed background *check* (offline launch, dev build without the
- * updater) never had an `available` to latch, so it never walls anything off.
- * Local edits stay safe throughout — notes are on disk, and `installUpdate`
- * flushes the open note before relaunching.
+ * Why a wall rather than a dismissible bar at that point: old builds are
+ * exactly where the bugs we just fixed live — one stale client can resurrect
+ * deleted folders for a whole team. Keeping everyone on the latest version is a
+ * correctness feature here, not a nag.
+ *
+ * The version is LATCHED on `failed`, so the wall stays up through a manual
+ * retry and its download progress instead of vanishing mid-install and letting
+ * a known-stale build back in. A failed background *check* (offline launch, dev
+ * build without the updater) never reaches `failed`, so it still walls nothing
+ * off. Local edits stay safe throughout — notes are on disk, and
+ * `installUpdate` flushes the open note before it touches anything.
  */
 function UpdateGate() {
   const update = useUpdateState();
   const [required, setRequired] = useState<string | null>(null);
   useEffect(() => {
-    if (update.phase === "available") setRequired(update.version);
+    if (isUpdateBlocking(update) && "version" in update) setRequired(update.version);
   }, [update]);
 
-  if (!isUpdateBlocking(update) && !(update.phase === "error" && required)) {
-    return null;
-  }
+  if (!required) return null;
 
   const pct =
     update.phase === "downloading" && update.total > 0
@@ -411,6 +413,21 @@ function UpdateGate() {
       : null;
 
   const version = ("version" in update ? update.version : null) ?? required;
+
+  // Once the wall is up the only thing left in the window is this card, so a
+  // manual retry restarts the moment it can — the quiet-moment wait exists to
+  // protect someone who is typing, and nobody is typing behind the wall.
+  const retry = async () => {
+    // Re-discover then install: the failed attempt may have died at either
+    // stage, and checkForUpdate re-arms the pending update.
+    if (await checkForUpdate()) await installUpdate({ waitForQuiet: false });
+  };
+
+  const working =
+    update.phase === "checking" ||
+    update.phase === "downloading" ||
+    update.phase === "installing" ||
+    update.phase === "ready";
 
   // Escape hatch beside the install CTA: flush the open note, then reboot the
   // webview — same as the reload shortcut. Useful when a wall raised by a
@@ -438,28 +455,14 @@ function UpdateGate() {
           <h1>Update required</h1>
           {version && <span className="update-gate-version">v{version}</span>}
         </div>
-        {update.phase === "available" && (
-          <>
-            <p>
-              A new version of {BRAND_NAME} is ready. Installing takes a moment, and your
-              notes stay right where they are — on your disk.
-            </p>
-            <div className="update-gate-actions">
-              <AsyncButton className="primary update-gate-cta" onClick={() => installUpdate()}>
-                Install Update
-              </AsyncButton>
-              <button className="ghost-pill lg" onClick={() => void reload()}>
-                Reload
-              </button>
-            </div>
-          </>
-        )}
-        {(update.phase === "downloading" || update.phase === "installing") && (
+        {working && (
           <>
             <p role="status">
-              {update.phase === "installing"
-                ? "Installing — the app will restart itself…"
-                : `Downloading v${update.version}${pct != null ? ` — ${pct}%` : "…"}`}
+              {update.phase === "checking"
+                ? "Checking for the update…"
+                : update.phase === "downloading"
+                  ? `Downloading v${update.version}${pct != null ? ` — ${pct}%` : "…"}`
+                  : "Installing — the app will restart itself…"}
             </p>
             {/* A determinate bar when the server sent a content length, an
                 indeterminate sweep when it didn't — a bar that fills to an
@@ -479,22 +482,16 @@ function UpdateGate() {
             </div>
           </>
         )}
-        {update.phase === "error" && required && (
+        {!working && (
           <>
             <p>
-              The update to <strong>v{required}</strong> didn&rsquo;t finish
-              {update.message ? ` — ${update.message}` : ""}. Check your connection and try
-              again.
+              {BRAND_NAME} couldn&rsquo;t install the update to <strong>v{required}</strong>
+              {"message" in update && update.message ? ` — ${update.message}` : ""}. It tried
+              twice on its own. Check your connection and try again — your notes stay right
+              where they are, on your disk.
             </p>
             <div className="update-gate-actions">
-              <AsyncButton
-                className="primary update-gate-cta"
-                onClick={async () => {
-                  // Re-discover then install: the failed attempt may have died at
-                  // either stage, and checkForUpdate re-arms the pending update.
-                  if (await checkForUpdate()) await installUpdate();
-                }}
-              >
+              <AsyncButton className="primary update-gate-cta" onClick={retry}>
                 Try again
               </AsyncButton>
               <button className="ghost-pill lg" onClick={() => void reload()}>
@@ -510,7 +507,9 @@ function UpdateGate() {
 
 /**
  * "What's New" — a centered modal shown on the first launch after an update,
- * with the release's one-liners and a one-shot confetti burst. A modal rather
+ * with that version's handful of points and a one-shot confetti burst. Only
+ * that version's: the notes are per-release now, so nobody reads a fresh
+ * update's dialog and sees changes they already had. A modal rather
  * than a banner: the old top strip pushed the whole page down, which read as
  * the content jumping. Stays until dismissed (the stash survives a quit), so
  * an update never lands completely unannounced.
@@ -525,9 +524,14 @@ function WhatsNewModal() {
     let cancelled = false;
     void justUpdatedTo().then((stash) => {
       if (cancelled || !stash) return;
-      // A wider cap than the banner's: this is a dialog with room, and a
-      // release that changed ten things should say so rather than stop at six.
-      setUpdated({ version: stash.version, notes: releaseNoteLines(stash.notes, 12) });
+      // Only the section for the version we were actually given, and at most
+      // five points of it. The body used to be the whole cumulative notes file,
+      // so every update opened on twelve bullets from releases already
+      // installed; the workflow ships one section now and this is the backstop.
+      setUpdated({
+        version: stash.version,
+        notes: releaseNoteLines(notesForVersion(stash.notes, stash.version), 5),
+      });
     });
     return () => {
       cancelled = true;
@@ -585,7 +589,8 @@ function WhatsNewModal() {
             <h2 className="whats-new-title">What&rsquo;s New</h2>
             <span className="whats-new-version">v{updated.version}</span>
             <p className="whats-new-sub">
-              {BRAND_NAME} just updated itself — here&rsquo;s what changed.
+              {BRAND_NAME} updated itself to the latest version — here&rsquo;s what
+              changed.
             </p>
           </div>
           {updated.notes.length > 0 && (
@@ -817,9 +822,14 @@ export default function App() {
         .getState()
         .initAuth()
         .catch((e) => console.error("auth init failed", e));
-      // Check for updates at launch AND on a background poll, but never install
-      // uninvited: a found release raises the required-update wall (UpdateGate),
-      // and the download/relaunch waits for the user's "Install & Restart" click.
+      // Check for updates at launch AND on a background poll, and install what
+      // we find WITHOUT asking: a found release is downloaded and installed
+      // silently, then the app restarts itself at the next pause in typing (see
+      // lib/quietMoment.ts). Nothing is shown on the way through — the user
+      // meets the new version in the What's New modal after the restart. The
+      // required-update wall (UpdateGate) is the fallback for when that silent
+      // path has failed twice.
+      //
       // Failures (offline, non-bundled dev build) are swallowed by the updater
       // store — surfaced only in Settings → Updates. App-lifetime interval —
       // never cleared, and the launch guard above keeps it single in dev
@@ -827,8 +837,8 @@ export default function App() {
       //
       // Not in a dev build: `tauri dev` still has the updater plugin and it
       // polls PRODUCTION's `latest.json`, so the day after any release every
-      // dev session opened the required-update wall — and "Install" then asked
-      // Tauri to relaunch a `cargo run` binary, which quit the app outright.
+      // dev session would silently download a release bundle and then ask Tauri
+      // to relaunch a `cargo run` binary, which quits the app outright.
       if (!import.meta.env.DEV) {
         void backgroundUpdateCheck();
         setInterval(() => void backgroundUpdateCheck(), UPDATE_POLL_MS);

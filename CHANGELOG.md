@@ -518,6 +518,26 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **Updates install themselves, with the wall as the fallback.** The app no
+  longer waits for a click to install an update it has already downloaded: it
+  checks, downloads, installs and relaunches at a quiet moment. The blocking
+  "Update required" screen is kept only for when that automatic install fails,
+  so a user is never stranded on a build that cannot update itself.
+- **Per-version release notes.** `docs/RELEASE_NOTES.md` is now a stack of
+  `## <version>` sections, newest first, each holding 2–5 *combined* user-facing
+  points rather than one bullet per change; an HTML comment at the top carries
+  the authoring rules and is stripped before publishing. `release.yml`'s
+  **Release notes** step extracts only the section matching
+  `needs.gate.outputs.version` (falling back to the topmost section, then to the
+  one-line placeholder) instead of `cat`ting the whole cumulative file, which is
+  what made every update's What's New open on twelve bullets the user had
+  already seen. `staging-release.yml` appends the topmost section under its
+  tester warning, because at staging the version bump has not happened yet. New
+  `lib/releaseNotes.ts` is the desktop backstop: `notesForVersion(body, version)`
+  narrows a multi-section body to the received version (first section if nothing
+  matches, whole body if there are no headings, HTML comments stripped) and
+  `releaseNoteLines` now caps at five. `releaseNoteLines` moved there out of
+  `lib/updater.ts`. Covered by `src/lib/__tests__/releaseNotes.test.ts`.
 - **Health page: ignore, skip, take action.** `lib/health/ignore.ts` +
   `useHealthIgnores` keep a per-vault, per-device list (`localStorage`
   `context.healthIgnored:<vaultPath>`) of ignored check ids and dismissed issue

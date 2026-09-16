@@ -5,7 +5,19 @@
 // newer than the running app — and the bundle's minisign signature verifies
 // against our embedded public key — we download, install, and relaunch.
 //
-// This module is a tiny external store so both the launch-time banner and the
+// Updates are AUTOMATIC. A check that finds something newer downloads and
+// installs it in the background with no prompt, no banner and no wall, then
+// restarts the app at the next quiet moment (see `./quietMoment`). Nothing in
+// the UI asks permission, because there was never a useful answer: every
+// dismissible prompt left part of the fleet on old builds, and old builds are
+// where the bugs we just fixed live — one stale client can resurrect deleted
+// folders for a whole team.
+//
+// The full-screen wall (`UpdateGate` in App.tsx) is now the FALLBACK, not the
+// happy path: it appears only after the silent path has failed twice, when the
+// app is knowingly stale and cannot fix itself without help.
+//
+// This module is a tiny external store so the wall, the launch poll and the
 // Settings → Updates tab observe one shared check/install lifecycle instead of
 // each firing their own network request.
 import { getVersion } from "@tauri-apps/api/app";
@@ -14,6 +26,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { useSyncExternalStore } from "react";
 
 import { bridgeManager } from "./bridge";
+import { waitForQuietMoment } from "./quietMoment";
 
 export type UpdateState =
   | { phase: "idle" }
@@ -21,12 +34,25 @@ export type UpdateState =
   | { phase: "available"; version: string; notes?: string; date?: string }
   | { phase: "downloading"; version: string; downloaded: number; total: number }
   | { phase: "installing"; version: string }
+  /** New bytes are in place; we're holding the restart for a quiet moment. */
+  | { phase: "ready"; version: string }
   | { phase: "uptodate" }
-  | { phase: "error"; message: string };
+  | { phase: "error"; message: string }
+  /** The silent path gave up (install failed twice). This raises the wall. */
+  | { phase: "failed"; version: string; message: string };
+
+/** How long after a failed silent install before the one silent retry. */
+export const AUTO_RETRY_DELAY_MS = 30_000;
 
 let pending: Update | null = null;
 let state: UpdateState = { phase: "idle" };
 const listeners = new Set<() => void>();
+
+/** True from the moment a check finds something until relaunch or `failed`. */
+let autoInstalling = false;
+/** Silent install attempts spent on the current discovery. Budget: 2. */
+let autoAttempts = 0;
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
 function setState(next: UpdateState) {
   state = next;
@@ -45,6 +71,11 @@ function getSnapshot() {
 /** React hook: current update lifecycle state, shared app-wide. */
 export function useUpdateState(): UpdateState {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/** The same state outside React, for imperative callers and tests. */
+export function updateState(): UpdateState {
+  return state;
 }
 
 /**
@@ -76,23 +107,51 @@ export async function checkForUpdate(): Promise<boolean> {
   }
 }
 
+/** Write the open note's debounced buffer to disk. Never throws. */
+async function flushOpenNote(): Promise<void> {
+  try {
+    await bridgeManager.currentBridge()?.flushEgest();
+  } catch (e) {
+    console.error("flush before update failed", e);
+  }
+}
+
 /**
  * Download + install the update discovered by `checkForUpdate`, then relaunch
- * into the new version. Progress is reflected in the shared state.
+ * into the new version. Progress is reflected in the shared state. Resolves
+ * true once the relaunch has been asked for, false if the attempt failed (the
+ * caller decides whether that is a retry or the wall).
+ *
+ * WINDOWS, and why the flush happens BEFORE the download rather than after:
+ * on Windows `install` hands the bundle to the NSIS/MSI installer via
+ * `ShellExecuteW` and then calls `std::process::exit(0)` — see
+ * `tauri-plugin-updater`'s `updater.rs install_inner`. The process is gone
+ * before `downloadAndInstall` resolves, so nothing written after that call
+ * runs on Windows: not the flush, not the quiet wait, not `relaunch()` (the
+ * installer relaunches us instead). Everything that MUST happen — the
+ * just-updated stash and the disk flush — therefore happens up front, on every
+ * platform, so there is one code path rather than a platform branch. The cost
+ * is nil: `flushEgest` is a no-op when nothing is dirty, and macOS/Linux flush
+ * a second time right before `relaunch()` to catch edits typed during the
+ * download and the quiet wait.
  */
-export async function installUpdate(): Promise<void> {
+export async function installUpdate(
+  options: { waitForQuiet?: boolean } = {},
+): Promise<boolean> {
   const update = pending;
-  if (!update) return;
+  if (!update) return false;
   // Stash the version/notes now — the Update object dies with this process, and
-  // the next boot reads the stash back to show the "Updated to vX" banner.
+  // the next boot reads the stash back to show the What's New modal.
   try {
     localStorage.setItem(
       JUST_UPDATED_KEY,
       JSON.stringify({ version: update.version, notes: update.body ?? null }),
     );
   } catch {
-    // Storage full/blocked: the update still proceeds, only the banner is lost.
+    // Storage full/blocked: the update still proceeds, only the modal is lost.
   }
+  // See the Windows note above: this is the flush that is guaranteed to run.
+  await flushOpenNote();
   let total = 0;
   let downloaded = 0;
   try {
@@ -112,19 +171,82 @@ export async function installUpdate(): Promise<void> {
           break;
       }
     });
-    // The user clicks Install & Restart mid-session with a note open, so flush
-    // the bridge's debounced disk write first — same rule as the ⌘R reload
-    // path. A no-op when nothing is open.
-    try {
-      await bridgeManager.currentBridge()?.flushEgest();
-    } catch (e) {
-      console.error("flush before update relaunch failed", e);
-    }
-    // New bytes are in place; restart into them. On macOS this quits and
-    // relaunches; on Windows the installer hands off to the new process.
+    // Windows never gets here. On macOS/Linux the new bundle is on disk while
+    // this process keeps running from the old one, so the only disruptive act
+    // left is the restart — hold it until the user pauses.
+    setState({ phase: "ready", version: update.version });
+    if (options.waitForQuiet !== false) await waitForQuietMoment();
+    // Catch anything typed during the download and the wait.
+    await flushOpenNote();
     await relaunch();
+    return true;
   } catch (e) {
     setState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
+    return false;
+  }
+}
+
+/**
+ * The silent path: install what `checkForUpdate` found, and if that fails give
+ * it exactly one more go ~30s later before admitting defeat. Only the second
+ * failure lands in `failed`, which is the single state that raises the wall —
+ * a flaky download or a network blip should cost the user nothing, not a
+ * full-screen interruption.
+ */
+async function autoInstall(): Promise<void> {
+  autoAttempts += 1;
+  const version = "version" in state ? state.version : "";
+  if (await installUpdate()) return;
+  if (autoAttempts >= 2) {
+    autoInstalling = false;
+    setState({
+      phase: "failed",
+      version,
+      message: state.phase === "error" ? state.message : "",
+    });
+    return;
+  }
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    void (async () => {
+      // Re-discover first: a failed attempt may have died at either stage, and
+      // `checkForUpdate` re-arms the pending Update handle.
+      if (await checkForUpdate()) {
+        await autoInstall();
+      } else {
+        // Nothing to install any more (or the check itself failed). Either way
+        // the app is not knowingly stale, so no wall — the poll will retry.
+        autoInstalling = false;
+        autoAttempts = 0;
+      }
+    })();
+  }, AUTO_RETRY_DELAY_MS);
+}
+
+/**
+ * Take the held restart now, rather than waiting for the quiet moment — the
+ * Settings → Updates "Restart now" button, for someone who has finished a
+ * thought and would rather not be interrupted later.
+ */
+export async function relaunchForUpdate(): Promise<void> {
+  await flushOpenNote();
+  await relaunch();
+}
+
+/**
+ * Check, and install whatever is found — the entry point for the launch check,
+ * the background poll and the Settings → Updates button alike. Fire-and-forget:
+ * a failed CHECK (offline, dev build) lands in `error` and blocks nothing.
+ */
+export async function checkAndAutoInstall(): Promise<void> {
+  if (autoInstalling) return;
+  autoInstalling = true;
+  autoAttempts = 0;
+  if (await checkForUpdate()) {
+    await autoInstall();
+  } else {
+    autoInstalling = false;
   }
 }
 
@@ -136,19 +258,20 @@ export function currentVersion(): Promise<string> {
 /**
  * Updates are REQUIRED: is the app currently blocked behind one?
  *
- * True for every live stage of an update — discovered, downloading, installing.
- * The `error` phase is deliberately NOT blocking on its own: a failed background
- * CHECK (offline launch, dev build without the updater) must never wall off the
- * app. The gate component latches the version once it has seen `available`, so
- * an error *during the install* keeps the wall up with a retry instead of
- * silently letting a known-stale build back in.
+ * Only `failed` — the silent path downloaded, installed and restarted without
+ * ever asking, so discovery, download, install and the held restart are all
+ * invisible and none of them block anything. The wall is what is left when the
+ * app cannot update itself: two attempts spent, a version we know is stale, and
+ * a user who has to point us at a working network.
+ *
+ * The `error` phase is deliberately NOT blocking: a failed background CHECK
+ * (offline launch, dev build without the updater) must never wall off the app,
+ * and neither should the FIRST install failure — that one buys a silent retry
+ * ({@link AUTO_RETRY_DELAY_MS}) instead. The gate component latches on `failed`
+ * so the wall stays put through a manual retry and its progress.
  */
 export function isUpdateBlocking(state: UpdateState): boolean {
-  return (
-    state.phase === "available" ||
-    state.phase === "downloading" ||
-    state.phase === "installing"
-  );
+  return state.phase === "failed";
 }
 
 // ---------------------------------------------------------------------------
@@ -170,26 +293,21 @@ interface JustUpdated {
 }
 
 /**
- * Background check, no install: when a newer version exists it lands the shared
- * state in `available`, which App's UpdateBanner renders as "Install & Restart".
- * The install itself is always a user click (the banner or Settings → Updates) —
- * a mid-session relaunch the user didn't ask for proved too disruptive. Callers
- * treat this as fire-and-forget from launch AND from the poll; every failure
- * lands in the `error` phase (surfaced only in Settings → Updates — an offline
- * launch is not an event).
+ * Background check AND install: when a newer version exists the bytes come down
+ * and go in with no prompt, and the app restarts itself at the next pause in
+ * typing. Nothing is surfaced on the way — the user learns about it from the
+ * What's New modal after the restart.
+ *
+ * Callers treat this as fire-and-forget from launch AND from the poll; every
+ * failure lands in the `error` phase (surfaced only in Settings → Updates — an
+ * offline launch is not an event), and only a second consecutive INSTALL
+ * failure escalates to `failed` and the wall.
  */
 export async function backgroundUpdateCheck(): Promise<void> {
-  // Skip a tick that fires while a check or a user-initiated download/install
-  // is in flight. An `available` state is NOT skipped: re-checking keeps a
-  // long-running app's banner current if an even newer version ships.
-  if (
-    state.phase === "checking" ||
-    state.phase === "downloading" ||
-    state.phase === "installing"
-  ) {
-    return;
-  }
-  await checkForUpdate();
+  // Skip a tick that fires while a check or an install is already in flight —
+  // including the held restart, where the bytes are already in place.
+  if (autoInstalling || state.phase === "checking") return;
+  await checkAndAutoInstall();
 }
 
 /**
@@ -226,25 +344,4 @@ export function clearJustUpdated(): void {
   } catch {
     // Nothing to do — worst case the banner shows once more.
   }
-}
-
-/**
- * Release notes → the banner's one-liners. Keeps markdown bullet lines (and
- * plain lines) as-is minus the bullet, drops headings/blanks and the historic
- * placeholder body, and caps the list so a long release stays a glance.
- *
- * `**bold**` is unwrapped rather than rendered: the same text is the GitHub
- * release body, where emphasis reads well, and these lines land in a plain
- * `<span>` where the asterisks would just be litter.
- */
-export function releaseNoteLines(notes: string | null | undefined, max = 6): string[] {
-  if (!notes) return [];
-  return notes
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("#"))
-    .filter((line) => !line.startsWith("See the assets below"))
-    .map((line) => line.replace(/^[-*•]\s+/, ""))
-    .map((line) => line.replace(/\*\*(.+?)\*\*/g, "$1"))
-    .slice(0, max);
 }

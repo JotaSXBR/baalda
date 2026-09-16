@@ -221,7 +221,11 @@ collaborative apps (Notion, Confluence) keep your data in their database. Baalda
 
 - macOS (Apple Silicon + Intel, `.dmg`), Windows 10/11 (`.exe`, `.msi`), Linux x64 (`.AppImage`,
   `.deb`, `.rpm`). Windows/Linux builds are unsigned, so first launch may warn.
-- In-app updater, signed. Releases at github.com/naveedharri/baalda/releases.
+- **Updates itself.** Baalda checks for a new version, downloads it, installs it and restarts
+  at a quiet moment, on every platform — nothing to click. Every update is verified with
+  Baalda's own signing key. On the first launch after one, a short **What's New** shows a
+  handful of points covering only the version you just received. Releases at
+  github.com/naveedharri/baalda/releases.
 - **Planned**: iOS app. No web app for editing (public links are read-only pages).
 
 ## Hosting options
