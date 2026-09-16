@@ -2534,7 +2534,7 @@ body:has(.sidebar-resizer.dragging) {
   --tab-inset: 6px;
   /* The card's top corners. Larger than `--radius-sm` on purpose: at 6px the
      outline read as a near-right angle; a browser tab wants a soft shoulder. */
-  --tab-radius: 12px;
+  --tab-radius: 14px;
   gap: var(--sp-1);
   overflow-x: auto;
   overflow-y: hidden;
@@ -2604,8 +2604,12 @@ body:has(.sidebar-resizer.dragging) {
   height: var(--tab-radius);
   pointer-events: none;
 }
+/* The square starts ON the card's border column, not one pixel outside it: the
+   sheet-coloured part of the gradient then paints over the card's straight side
+   for the bottom r px, so the side turns into the arc instead of continuing
+   past it — which is the "straight line sticking out" under each corner. */
 .tab-active-bg::before {
-  left: calc(var(--tab-radius) * -1 - 1px);
+  left: calc(var(--tab-radius) * -1);
   background: radial-gradient(
     circle at 0 0,
     transparent calc(var(--tab-radius) - 1.5px),
@@ -2615,7 +2619,7 @@ body:has(.sidebar-resizer.dragging) {
   );
 }
 .tab-active-bg::after {
-  right: calc(var(--tab-radius) * -1 - 1px);
+  right: calc(var(--tab-radius) * -1);
   background: radial-gradient(
     circle at 100% 0,
     transparent calc(var(--tab-radius) - 1.5px),
