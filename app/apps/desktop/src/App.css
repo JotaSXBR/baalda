@@ -4826,13 +4826,25 @@ body:has(.sidebar-resizer.dragging) {
   font-weight: 600;
 }
 
-/* "Forgot password?" — right-aligned under the password field, so it reads as
-   belonging to it rather than as a second submit action. */
-.auth-forgot {
+/* The row under the password field: "Remember email address" on the left,
+   "Forgot password?" right-aligned, so the link still reads as belonging to the
+   field above it rather than as a second submit action. The row keeps its right
+   edge when the switch is the only thing in it. */
+.auth-form-options {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
   margin: calc(-1 * var(--sp-1)) 0 0;
   font-size: var(--fs-sm);
+}
+.auth-remember {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
 }
 .auth-reset-lede {
   margin: 0;
