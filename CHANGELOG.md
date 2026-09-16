@@ -236,7 +236,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Changed
 - **Main window sized to the screen on launch** (`lib.rs fit_window_to_screen`,
-  before reveal so the first frame is already right): 86% × 88% of the current
+  before reveal so the first frame is already right): 79% × 88% of the current
   monitor's work area in logical pixels, centered, never below the config's
   1200×800 unless the screen is smaller, capped at 2000×1400.
 - **Pressing Private seals the vault, for the person who pressed it too.** The

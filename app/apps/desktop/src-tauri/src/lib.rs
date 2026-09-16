@@ -23,7 +23,7 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Open the main window at a size that suits the screen it lands on: about
-/// 86% × 88% of the monitor's work area, centered, never smaller than the
+/// 79% × 88% of the monitor's work area, centered, never smaller than the
 /// 1200×800 in `tauri.conf.json` unless the screen itself is, and capped so a
 /// 5K display does not get a 4,000-pixel-wide editor. The config's fixed
 /// 1200×800 was right for a laptop and opened as a small box in the middle of
@@ -46,7 +46,7 @@ fn fit_window_to_screen(win: &tauri::WebviewWindow) {
     let avail_h = area.size.height as f64 / scale;
     let floor_w = 1200.0_f64.min(avail_w);
     let floor_h = 800.0_f64.min(avail_h);
-    let w = (avail_w * 0.86).clamp(floor_w, 2000.0_f64.max(floor_w));
+    let w = (avail_w * 0.79).clamp(floor_w, 2000.0_f64.max(floor_w));
     let h = (avail_h * 0.88).clamp(floor_h, 1400.0_f64.max(floor_h));
     if let Err(e) = win.set_size(tauri::LogicalSize::new(w, h)) {
         log::warn!("[window] could not size the window to the screen: {e}");
