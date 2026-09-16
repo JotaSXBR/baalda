@@ -1187,7 +1187,16 @@ export default function App() {
                   </div>
                 }
               >
-                <Editor />
+                {/* The editor is the one subtree that binds React to
+                    CodeMirror, and a throw anywhere in it used to unmount the
+                    WHOLE app to a blank window with no message — the crash that
+                    `lib/editor/effectDispatch.ts` describes reached users that
+                    way, undiagnosable because release builds carry no logging.
+                    `resetKeys` on the note path means switching notes (or
+                    reopening this one) clears the fallback and tries again. */}
+                <ErrorBoundary label="Editor" resetKeys={[openNote.path]}>
+                  <Editor />
+                </ErrorBoundary>
               </Suspense>
             ) : (
               <EditorEmpty />
