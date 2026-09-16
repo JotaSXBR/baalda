@@ -15,9 +15,15 @@ import type { DocWriter } from "../mcp/doc-writer.js";
  *    timer, re-armed on every edit, fires once the doc has been quiet for
  *    {@link IDLE_CAPTURE_MS}. That gives one version per sitting instead of one
  *    per keystroke, and no scheduler.
- *  - **last_edited_by/at** is stamped eagerly but throttled (immediately when
- *    the editor changes, else at most once a minute), because it is what a file
- *    row in every open sidebar shows.
+ *  - **last_edited_by/at** (and `updated_at`) is stamped on EVERY stored change.
+ *    The throttle that used to sit on the stamp — immediately when the editor
+ *    changes, else at most once a minute — now sits only on the `registry-changed`
+ *    broadcast that follows it, because those are two different costs: the row
+ *    write is one primary-key UPDATE on a path that already appends an update row,
+ *    while the broadcast makes every client in the vault re-pull the whole
+ *    registry. Scripts and agents poll `notes.updated_at` to see whether their
+ *    write landed, and a throttled stamp made that column lie for up to a minute
+ *    (#104); an unthrottled broadcast would loop the vault the way #98 did.
  *
  * Versions hold MARKDOWN TEXT + sha256, never Yjs bytes: the update log is
  * compacted away, a gc'd Y.Doc can't reconstruct a past state, and both preview
@@ -30,7 +36,8 @@ type Queryable = Pick<pg.Pool, "query">;
 export const IDLE_CAPTURE_MS = 10 * 60_000;
 /** Versions kept per note; the oldest beyond this are pruned on each capture. */
 export const MAX_VERSIONS_PER_NOTE = 50;
-/** Re-stamp last_edited_at at most this often for the same editor. */
+/** Re-broadcast a stamp to the vault at most this often for the same editor.
+ *  (The row itself is written every time — see the module comment.) */
 const STAMP_THROTTLE_MS = 60_000;
 /** Per-vault ceiling on how often the lazy daily-checkpoint check runs. */
 const CHECKPOINT_CHECK_INTERVAL_MS = 5 * 60_000;
@@ -185,11 +192,21 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
     }
   }
 
-  async function stamp(session: Session, docId: string, userId: string): Promise<void> {
+  /**
+   * Write the row always; announce it only when the caller says so.
+   *
+   * `stampLastEdited` reports whether a live note row was actually updated, so a
+   * soft-deleted (or unknown) doc still broadcasts nothing.
+   */
+  async function stamp(
+    session: Session,
+    docId: string,
+    userId: string,
+    notify: boolean,
+  ): Promise<void> {
     try {
-      if (await stampLastEdited(docId, userId, db)) {
-        deps.onRegistryChanged?.(session.vaultId, null);
-      }
+      const stamped = await stampLastEdited(docId, userId, db);
+      if (stamped && notify) deps.onRegistryChanged?.(session.vaultId, null);
     } catch (err) {
       console.error(`[versions] last-edited stamp failed for ${docId}:`, err);
     }
@@ -212,15 +229,20 @@ export function createVersionCapture(deps: VersionCaptureDeps): VersionCapture {
       if (typeof timer.unref === "function") timer.unref();
       session.timer = timer;
 
-      // Stamp immediately when the editor changes hands, else at most once a
-      // minute — this write lands in every open sidebar via a registry re-pull.
-      if (
-        userId &&
-        (session.stampedUserId !== userId || now - session.stampedAt > STAMP_THROTTLE_MS)
-      ) {
-        session.stampedUserId = userId;
-        session.stampedAt = now;
-        void stamp(session, docId, userId);
+      // Stamp the row on every edit — `notes.updated_at` is how a script or an
+      // agent asks "did my write land", and it has to be true (#104). The
+      // vault-wide re-pull this used to gate is what stays throttled: announce
+      // immediately when the editor changes hands, else at most once a minute.
+      // The sidebar's "edited by X, <time>" is therefore up to 60 s behind the
+      // row, exactly as it already was.
+      if (userId) {
+        const notify =
+          session.stampedUserId !== userId || now - session.stampedAt > STAMP_THROTTLE_MS;
+        if (notify) {
+          session.stampedUserId = userId;
+          session.stampedAt = now;
+        }
+        void stamp(session, docId, userId, notify);
       }
 
       // Lazy daily checkpoint: activity-triggered, no scheduler. The real

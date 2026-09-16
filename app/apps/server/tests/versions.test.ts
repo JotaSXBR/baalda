@@ -163,6 +163,77 @@ describe("per-note versions", () => {
     expect(rec.registryBroadcasts).toContainEqual({ vaultId: vault, originId: null });
   });
 
+  // The row and the broadcast are on different clocks on purpose (#104): a
+  // script or an agent polls `notes.updated_at` to learn whether its write
+  // landed, so every stored change has to move it — while the vault-wide
+  // `registry-changed` re-pull it triggers stays throttled to once a minute.
+  it("stamps the row on every touch but broadcasts at most once a minute", async () => {
+    const user = await signUp("stamp2@t.com");
+    const org = await seedOrg("Acme", "acme-v5b");
+    await seedMember(org, user.userId, "owner");
+    const vault = await seedVault(org);
+    const docId = await seedNote(vault, null, "n.md", user.userId);
+    rec.docWriter.store.set(docId, "hello");
+
+    const capture = createVersionCapture({
+      docWriter: rec.docWriter,
+      onRegistryChanged: rec.deps.onRegistryChanged,
+      idleMs: 60_000,
+    });
+    const stampedAt = async (): Promise<{ updated: number; edited: number }> => {
+      const { rows } = await pool.query<{ updated_at: Date; last_edited_at: Date }>(
+        "SELECT updated_at, last_edited_at FROM notes WHERE id = $1",
+        [docId],
+      );
+      return { updated: rows[0].updated_at.getTime(), edited: rows[0].last_edited_at.getTime() };
+    };
+
+    capture.touch(vault, docId, user.userId);
+    await new Promise((r) => setTimeout(r, 100)); // the stamp is fire-and-forget
+    const first = await stampedAt();
+    expect(rec.registryBroadcasts).toHaveLength(1);
+
+    capture.touch(vault, docId, user.userId); // same editor, well inside the 60 s window
+    await new Promise((r) => setTimeout(r, 100));
+    capture.stop();
+
+    const second = await stampedAt();
+    expect(second.updated).toBeGreaterThan(first.updated);
+    expect(second.edited).toBeGreaterThan(first.edited);
+    expect(rec.registryBroadcasts).toHaveLength(1); // …and still only one fan-out
+  });
+
+  it("broadcasts immediately when the editor changes hands", async () => {
+    const owner = await signUp("hands-a@t.com");
+    const mate = await signUp("hands-b@t.com");
+    const org = await seedOrg("Acme", "acme-v5c");
+    await seedMember(org, owner.userId, "owner");
+    await seedMember(org, mate.userId, "member");
+    const vault = await seedVault(org);
+    const docId = await seedNote(vault, null, "n.md", owner.userId);
+    rec.docWriter.store.set(docId, "hello");
+
+    const capture = createVersionCapture({
+      docWriter: rec.docWriter,
+      onRegistryChanged: rec.deps.onRegistryChanged,
+      idleMs: 60_000,
+    });
+    capture.touch(vault, docId, owner.userId);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(rec.registryBroadcasts).toHaveLength(1);
+
+    capture.touch(vault, docId, mate.userId); // different editor → no throttle
+    await new Promise((r) => setTimeout(r, 100));
+    capture.stop();
+
+    expect(rec.registryBroadcasts).toHaveLength(2);
+    const { rows } = await pool.query<{ last_edited_by: string }>(
+      "SELECT last_edited_by FROM notes WHERE id = $1",
+      [docId],
+    );
+    expect(rows[0].last_edited_by).toBe(mate.userId);
+  });
+
   it("surfaces the stamp on GET /api/notes (name joined in)", async () => {
     const user = await signUp("surf@t.com");
     const org = await seedOrg("Acme", "acme-v6");

@@ -1580,12 +1580,26 @@ export class SyncManager implements InboundHost {
     });
     this.uploader = uploader;
 
+    // This run emptied `localChanges` up front, so every note it did not manage
+    // to confirm is now owned by nobody: a doc that is already `isPushed` is not
+    // in the bulk run's work list either, so it would sit there until the next
+    // watcher event for that same file. Put the batch back before abandoning the
+    // run and let the next drain retry it — a note whose bytes DID land ingests
+    // to "no change" and costs no socket, so the retry is cheap (#104).
+    const requeue = (): void => {
+      if (!scope.isCurrent()) return;
+      for (const n of notes) {
+        if (!this.localChanges.has(n.docId)) this.localChanges.set(n.docId, n.relPath);
+      }
+      this.armLocalChangeDrain(scope, LOCAL_CHANGE_RETRY_MS);
+    };
+
     const result = await uploader.run();
-    if (!scope.isCurrent() || this.uploader !== uploader) return;
+    if (!scope.isCurrent() || this.uploader !== uploader) return requeue();
     this.recordPermanentFailures(uploader);
     await this.registry.flushCheckpoint();
-    if (!scope.isCurrent() || this.uploader !== uploader) return;
-    if (result.cancelled) return;
+    if (!scope.isCurrent() || this.uploader !== uploader) return requeue();
+    if (result.cancelled) return requeue();
     this.completeRun(scope);
   }
 

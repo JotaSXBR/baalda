@@ -51,6 +51,18 @@ export class NoteBridge {
    *  truncation refusal: a placeholder file that keeps being re-read must log
    *  once, not per watcher event. */
   private truncateReported = false;
+  /** An ingest applied disk bytes into this doc that no `ingestNow()` caller has
+   *  been told about yet. `hydrate` arms a DEBOUNCED ingest (150ms) to reconcile
+   *  a doc whose file moved on while it was closed, and nothing owns that merge:
+   *  if it fires while `ContentUploader.pushOne` is still awaiting its own
+   *  `readFile` (one slow IPC round trip, or a `hydrate`-time `compact()`), the
+   *  uploader's `ingestNow()` then finds the file already merged, exits through
+   *  the converged branch with false, and — the doc being `isPushed` — marks it
+   *  synced WITHOUT opening a socket. The external edit is then local-only until
+   *  the next write to that file drags it along (#104). The two sibling ingests
+   *  both report their merge (`divergedDocs` via `handleLocalFileChanged` and
+   *  `onExternalMerge`); this flag is how the hydrate one does. */
+  private diskMergedUnreported = false;
   /** True once a recovery snapshot has been taken for a large diff. */
   private recoverySnapshotTaken = false;
   /** True once this doc has held non-empty text in this session. Guards egest:
@@ -325,6 +337,12 @@ export class NoteBridge {
    * doc actually changed — false covers our own egest echoing back and an
    * already-converged file, which is what lets the caller skip the network
    * round-trip entirely.
+   *
+   * "Changed" means "disk bytes reached this doc and nobody has been told",
+   * not "changed inside this call": a debounced ingest (the one `hydrate` arms)
+   * can have merged the same file moments earlier, and reporting false for it
+   * strands the merge locally while the badge says synced — see
+   * {@link diskMergedUnreported}.
    */
   async ingestNow(): Promise<boolean> {
     if (this.destroyed) return false;
@@ -333,7 +351,10 @@ export class NoteBridge {
       this.ingestTimer = null;
     }
     this.ingestDirty = true;
-    return this.drainIngest();
+    const changed = await this.drainIngest();
+    const merged = changed || this.diskMergedUnreported;
+    this.diskMergedUnreported = false;
+    return merged;
   }
 
   /**
@@ -476,6 +497,11 @@ export class NoteBridge {
     this.doc.transact(() => {
       applyDiff(this.text, diffs);
     }, ORIGIN_DISK);
+    // The ONLY place disk bytes enter the doc. Every refusal above (echo hash,
+    // converged, 0-byte, oversize, unseeded-empty) returns before this, so the
+    // no-socket fast path in `ContentUploader.pushOne` keeps firing for our own
+    // egest echoes — the flag is set strictly for merges that really happened.
+    this.diskMergedUnreported = true;
     return true;
   }
 
