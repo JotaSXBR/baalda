@@ -53,6 +53,45 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **Switching between two locked notes took the whole app down to a blank
+  window.** `ReactWidget.toDOM`/`updateDOM` call `flushSync` from inside a
+  CodeMirror DOM update (deliberately — it is what makes CM6 measure a widget's
+  real height on the first frame), and React answers a `flushSync` by flushing
+  the WHOLE app root's pending passive effects, not just the widget's own tree.
+  So `Editor`'s `[readOnly]` effect re-entered the update it had itself started
+  and CodeMirror threw `Calls to EditorView.update are not allowed while an
+  update is in progress`. Only locked notes reached it: opening the first one
+  populates the `locks` store (via the `read-only` status → `refreshLocks`), so
+  every locked note after it is built read-only from frame one, and the
+  teardown's transient vault-channel `"synced"` then flipped `readOnly`
+  false→true — two reconfigures, each rebuilding the note-header widgets whose
+  decorations key off `state.readOnly`. All three compartment reconfigures now
+  go through `lib/editor/effectDispatch.ts`, which defers to a microtask (after
+  the update unwinds, still before paint) and drops the transaction if the note
+  was switched meanwhile. `<Editor>` is additionally wrapped in an
+  `ErrorBoundary` — it had none, which is why a single throw cost the entire
+  window with no message anywhere, in a release build that carries no logging.
+- **The teardown's phantom `"synced"` granted edit access to a note that never
+  had it.** `syncManager.closeCurrent()` nulls its own status and re-emits, so
+  between one note's teardown and the next note's `openDoc` the badge falls back
+  to the vault channel's — normally `"synced"`. `Editor`'s `[syncStatus]` effect
+  read that as a grant and set `hadEditAccessRef`, which permanently disabled the
+  pre-verdict keystroke rollback for the rest of the session: anything typed on a
+  later locked note before its read-only verdict landed stayed in the local
+  Y.Doc, egested to the `.md` and forked against the server. Now gated on
+  `bridgeRef.current`, which is null for exactly that window.
+- **The note loading skeleton only covered the second half of an open.** The
+  editor column branched on `openNote`, which `openNoteByPath` sets only after
+  `getNoteMeta` and `registerNote`; `openingNotePath` — set on the click — was
+  read by the sidebar row and the tab bar but never by the editor. On a first
+  open there was no `<Editor>` mounted at all, so the column showed "Select a
+  note" for the whole wait. Both now render the skeleton. Its hold also drops
+  from 180ms to 90ms: that number was tuned against a dev build, where
+  StrictMode double-invokes the open effect and the pane therefore sits empty
+  about twice as long as in a release build — an open landing between the two
+  painted a bare pane and then the text, which is the "loader works locally, not
+  in production" report. `[data-immediate]` now zeroes the delay instead of
+  killing the animation, so the bars no longer snap to full opacity mid-fade.
 - **A client reauthed itself over its own registry writes.** Every
   `registry-changed` ran `refreshAcl({ reauth: "if-changed" })` with no origin
   self-exclusion, so a client's own pull registering notes grew its own readable

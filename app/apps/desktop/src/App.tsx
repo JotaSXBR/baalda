@@ -676,6 +676,7 @@ function PromptedAuthDialog() {
 export default function App() {
   const vault = useStore((s) => s.vault);
   const openNote = useStore((s) => s.openNote);
+  const openingNotePath = useStore((s) => s.openingNotePath);
   const switchingVault = useStore((s) => s.switchingVault);
   // Version history is a synced-vault feature: it needs the note's docId on the
   // server. No mapping (local vault, unregistered note) → no history button.
@@ -1187,8 +1188,25 @@ export default function App() {
                   </div>
                 }
               >
-                <Editor />
+                {/* The editor is the one subtree that binds React to
+                    CodeMirror, and a throw anywhere in it used to unmount the
+                    WHOLE app to a blank window with no message — the crash that
+                    `lib/editor/effectDispatch.ts` describes reached users that
+                    way, undiagnosable because release builds carry no logging.
+                    `resetKeys` on the note path means switching notes (or
+                    reopening this one) clears the fallback and tries again. */}
+                <ErrorBoundary label="Editor" resetKeys={[openNote.path]}>
+                  <Editor />
+                </ErrorBoundary>
               </Suspense>
+            ) : openingNotePath ? (
+              // First open of the session: there is no `<Editor>` mounted yet to
+              // draw its own skeleton, and the registration round trip happens
+              // before `openNote` exists — so without this the very first click
+              // showed "Select a note" for the whole wait.
+              <div className="editor-column" style={editorMeasureStyle(editorMeasure)}>
+                <EditorSkeleton />
+              </div>
             ) : (
               <EditorEmpty />
             )}

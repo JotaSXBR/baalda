@@ -512,16 +512,26 @@
   gap: var(--sp-3);
   background: var(--bg-surface);
   pointer-events: none;
-  /* Held back ~180ms. A note served from the local SQLite index opens in tens of
+  /* Held back ~90ms. A note served from the local SQLite index opens in tens of
      milliseconds, and a skeleton that flashes for one frame reads as a rendering
-     fault rather than as loading. */
-  animation: skeleton-in 0.2s var(--ease) 0.18s both;
+     fault rather than as loading — so there is still a hold, and a 40ms open
+     still shows nothing at all.
+     It was 180ms, which was tuned against a dev build: React StrictMode
+     double-invokes the open effect in development ONLY, so the pane sits empty
+     about twice as long there and the bars always cleared the hold. A release
+     build runs the effect once, and an open that lands between those two
+     numbers painted a bare pane for its whole duration and then the text —
+     which is the "no loader in production, loader in dev" report. */
+  animation: skeleton-in 0.2s var(--ease) 0.09s both;
 }
 /* Switching between notes: the outgoing view is already gone, so the bars take
-   its place on the same frame — no delay, no fade — and the swap reads as
-   "text → loading → text" instead of "text → blank → text". */
+   its place at once. Only the HOLD is dropped, not the fade — `animation: none`
+   here used to snap the bars to full opacity, and because the skeleton now
+   appears at click time (while the old note is still painted) that snap landed
+   mid-fade and read as a flicker. Zeroing the delay keeps one continuous
+   animation from the click through to the text. */
 .editor-skeleton[data-immediate] {
-  animation: none;
+  animation-delay: 0s;
 }
 /* `.editor-column` is the positioning context for the overlay above. */
 .editor-column {
