@@ -991,7 +991,10 @@
   color: var(--text-tertiary);
   pointer-events: none;
 }
-.settings-page .health-inspector-input {
+/* Outranks App.css's `.settings-page input:not([type="range"])` (0,2,1), which
+   otherwise re-applies its own padding and leaves the search glyph sitting on
+   top of the placeholder text. */
+.settings-page .health-inspector-field input.health-inspector-input {
   padding-left: calc(var(--sp-3) + 22px);
   border-radius: var(--radius-pill);
 }
