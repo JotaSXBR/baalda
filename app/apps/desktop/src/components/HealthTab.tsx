@@ -140,6 +140,23 @@ export function HealthView({
     <div className="health-tab">
       <VerdictCard snapshot={snapshot} onRefresh={refresh} loading={loading} />
 
+      {/* The bar first: it is the one-glance answer the verdict summarises,
+          and it belongs beside it rather than under the numbers. */}
+      <Section title="Sync">
+        {report.counts ? (
+          <SyncBreakdown counts={report.counts} />
+        ) : (
+          <div className="health-local-row">
+            <span className="muted">Sync is off for this folder.</span>
+            {onGoToGeneral && (
+              <button type="button" className="link-btn" onClick={onGoToGeneral}>
+                Turn on sync
+              </button>
+            )}
+          </div>
+        )}
+      </Section>
+
       {/* The vault's numbers sit right under the verdict as one quiet strip:
           they frame everything below ("15 notes, 259 KB") without competing
           with it. */}
@@ -157,20 +174,6 @@ export function HealthView({
 
       <Pipeline stages={report.stages} />
 
-      <Section title="Sync">
-        {report.counts ? (
-          <SyncBreakdown counts={report.counts} />
-        ) : (
-          <div className="health-local-row">
-            <span className="muted">Sync is off for this folder.</span>
-            {onGoToGeneral && (
-              <button type="button" className="link-btn" onClick={onGoToGeneral}>
-                Turn on sync
-              </button>
-            )}
-          </div>
-        )}
-      </Section>
 
       <Section
         title="Needs attention"
