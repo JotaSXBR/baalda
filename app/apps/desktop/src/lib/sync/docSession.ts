@@ -29,14 +29,17 @@ import { SyncProgressReporter } from "./progress";
 import { decideSeed } from "./startup";
 import { SessionRejectionGuard } from "./sessionGuard";
 import { DocSync, type SyncStatus } from "./syncManager";
-import { VaultRegistry, type InboundHost } from "./registry";
+import { VaultRegistry, type InboundHost, type RegistryFailure } from "./registry";
 import { VaultDocStore, createIpcManifestStore } from "./vaultDocStore";
 import {
   vaultScopes,
   type DocSyncState,
   type SyncProgress,
+  type SyncProgressPhase,
   type VaultScope,
 } from "./vaultScope";
+import { SyncLog } from "./syncLog";
+import type { SyncLogEntry, SyncLogLevel } from "../health/types";
 import {
   VaultSyncEngine,
   type VaultPeer,
@@ -275,6 +278,11 @@ export class SyncManager implements InboundHost {
     // Item colors are a vault-wide fact and ride the same pull (see
     // `VaultRegistry.publishColors`).
     this.registry.setColorListener((colors) => this.publishColors(colors));
+    // Every structural refusal, as it happens, in the vault's timeline. The
+    // accumulated list (`registry.failures()`) answers "what is broken"; this
+    // answers "when, and after what" — which is the half the Health page needs
+    // to explain a failure rather than just count it.
+    this.registry.setFailureListener((f) => this.logRegistryFailure(f));
     // Inbound reconciliation mutates files the editor and the background doc store
     // may be holding, so it has to be able to make them let go first.
     this.registry.setInboundHost(this);
@@ -361,6 +369,28 @@ export class SyncManager implements InboundHost {
   private emittedStatus: SyncStatus | null = null;
   private statusHoldTimer: ReturnType<typeof setTimeout> | null = null;
   private onVaultStatus?: (status: VaultSyncStatus) => void;
+
+  // ---- the vault's sync timeline (Health page) ----------------------------
+  //
+  // Everything below already existed as `console.info` lines nobody outside a
+  // dev build can read. The log is the same facts, in sentences, kept in a
+  // bounded ring so the page can answer "what happened before this note stopped
+  // syncing" without a terminal.
+  //
+  // ONE instance for the manager's lifetime, CLEARED per vault rather than
+  // re-created: a subscriber (the Health hook) holds an unsubscribe from
+  // whatever instance it saw, and swapping the object under it would leave it
+  // listening to a log nothing writes to. A line about the vault you left
+  // explains nothing about the one you are looking at, so teardown empties it.
+  private readonly log = new SyncLog();
+  /**
+   * The bulk-run phase the log has already reported.
+   *
+   * The progress mirror emits ~10×/second while a run moves; only its PHASE
+   * transitions are events. Without this the timeline would be one line per
+   * emission, which is a progress bar rendered as prose.
+   */
+  private loggedPhase: SyncProgressPhase | null = null;
 
   // ---- push-to-talk voice ----
   //
@@ -585,6 +615,161 @@ export class SyncManager implements InboundHost {
     void this.sessionGuard.reject();
   }
 
+  // ---- sync timeline ------------------------------------------------------
+
+  /**
+   * This vault's recent sync events, oldest first — the Health page's
+   * timeline. A copy, so a React snapshot held across a later event is stable.
+   */
+  syncLog(): SyncLogEntry[] {
+    return this.log.entries();
+  }
+
+  /** Subscribe to sync-log changes. Returns the unsubscribe. */
+  onSyncLog(cb: () => void): () => void {
+    return this.log.subscribe(cb);
+  }
+
+  /**
+   * Record one line of the timeline.
+   *
+   * Every message here is read by a person who did not write this code, so it
+   * says what happened to their notes — never what happened to a data
+   * structure. No state vectors, no CRDTs, no hello manifests.
+   */
+  private note(
+    level: SyncLogLevel,
+    event: string,
+    message: string,
+    where?: { docId?: string | null; path?: string | null },
+  ): void {
+    this.log.push({
+      level,
+      event,
+      message,
+      docId: where?.docId ?? null,
+      path: where?.path ?? null,
+    });
+  }
+
+  /** The server this vault talks to, for a message a user can recognise.
+   *  Defensive: the timeline is never worth throwing for. */
+  private serverHost(): string {
+    try {
+      const url = authManager.getServerUrl();
+      return new URL(url).host || url;
+    } catch {
+      return "the server";
+    }
+  }
+
+  /**
+   * One status transition, as the user would describe it.
+   *
+   * Called from {@link publishStatus} — the single place a status actually
+   * reaches the UI — so the timeline and the pill can never disagree. The
+   * in-between states the pill deliberately swallows (`connecting`, and the
+   * blink `emitStatus` holds back) are not events and are not recorded.
+   */
+  private logStatus(s: SyncStatus): void {
+    // With no vault there is no timeline to write to. `disable()` deliberately
+    // re-emits the status AFTER teardown (so a note-less disable still drops to
+    // offline), and that line describes the vault we just left — logging it
+    // would put one stale entry into a log we had just emptied.
+    if (!this.scope) return;
+    switch (s) {
+      case "synced":
+        this.note("info", "connect", `Connected to ${this.serverHost()}`);
+        return;
+      case "offline":
+        this.note("warn", "offline", "Connection lost — reconnecting");
+        return;
+      case "read-only":
+        this.note(
+          "info",
+          "read-only",
+          "You have view-only access here — your edits stay on this device",
+        );
+        return;
+      case "no-access":
+        this.note("error", "no-access", "The server refused access to this vault");
+        return;
+      case "deleted":
+        this.note("warn", "deleted", "The open note no longer exists on the server");
+        return;
+      case "too-large":
+        this.note("error", "too-large", "The open note is too large for the server to accept");
+        return;
+      case "error":
+        this.note("warn", "error", "The server could not be reached — retrying");
+        return;
+      default:
+        // "connecting" — a handshake in progress is not news.
+        return;
+    }
+  }
+
+  /**
+   * The bulk run's lifecycle, from the phase the progress mirror is emitting.
+   *
+   * Taps the mirror rather than each call site because the phases already
+   * converge there: the registry, the download watchdog, the uploader and
+   * `completeRun` all write through one reporter, so one tap cannot miss a
+   * transition and cannot invent one.
+   */
+  private logRunPhase(p: SyncProgress | null): void {
+    const phase = p?.phase ?? null;
+    if (phase === this.loggedPhase) return;
+    const prev = this.loggedPhase;
+    this.loggedPhase = phase;
+    if (phase == null || phase === "idle") return;
+    if (phase === "registering" || phase === "uploading" || phase === "downloading") {
+      // One start per run, not one per phase: a run walks registering →
+      // downloading → uploading and all three are the same wave of work.
+      if (prev === "registering" || prev === "uploading" || prev === "downloading") return;
+      this.note("info", "run-start", "Checking every note against the server");
+      return;
+    }
+    if (phase === "done") {
+      const confirmed = p ? Math.max(0, p.done - p.failed) : 0;
+      this.note("info", "run-done", `Sync finished — ${confirmed} notes confirmed`);
+      return;
+    }
+    // "error" — the run ended without getting everything through.
+    const failed = p?.failed ?? 0;
+    if (failed > 0) {
+      this.note("error", "run-failed", `Sync finished with ${failed} notes not synced`);
+    } else {
+      this.note(
+        "error",
+        "run-failed",
+        "Sync could not finish — the app never reached the server",
+      );
+    }
+  }
+
+  /** One note the content push could not get to the server. */
+  private logUploadFailure(f: UploadFailure): void {
+    this.note(
+      "error",
+      // A permanent refusal is a different fact from a failed attempt: nothing
+      // retries it, so the page offers a different remedy.
+      f.permanent ? "too-large" : "push-failed",
+      `${f.relPath} — ${f.reason}`,
+      { docId: f.docId, path: f.relPath },
+    );
+  }
+
+  /** One folder/note the registry could not create, move or remove. */
+  private logRegistryFailure(f: RegistryFailure): void {
+    this.note(
+      "error",
+      "register-failed",
+      `${f.path} — ${f.reason}${f.code ? ` (${f.code})` : ""}`,
+      { docId: f.docId, path: f.path },
+    );
+  }
+
   /**
    * UI subscribes here for the current vault's bulk-sync progress
    * (`store.setSyncProgress`). Emitted at most ~10×/second; `null` means no run
@@ -668,6 +853,7 @@ export class SyncManager implements InboundHost {
 
   private publishStatus(s: SyncStatus): void {
     this.emittedStatus = s;
+    this.logStatus(s);
     this.onStatus?.(s);
   }
 
@@ -1057,6 +1243,7 @@ export class SyncManager implements InboundHost {
   handleServerReauth(scope: VaultScope): void {
     if (!scope.isCurrent()) return;
     this.aclChangedAt = Date.now();
+    this.note("info", "reauth", "Permissions changed — re-checking access");
     // Two things follow from "the ACL moved". The open note re-mints its token so
     // a view<->edit flip lands live...
     this.current?.refreshAccess();
@@ -1107,6 +1294,11 @@ export class SyncManager implements InboundHost {
     for (const docId of docIds) this.serverRevoked.add(docId);
     console.info(
       `[sync] server revoked ${docIds.length} doc(s) we hold${truncated ? " (truncated)" : ""}`,
+    );
+    this.note(
+      "warn",
+      "revoked",
+      `Access to ${docIds.length} ${docIds.length === 1 ? "note" : "notes"} was removed`,
     );
     this.handleRegistryChanged("acl-revoked");
   }
@@ -1213,6 +1405,10 @@ export class SyncManager implements InboundHost {
       this.emptyEverywhere.delete(mapping.docId);
       this.permanentFailures.delete(mapping.docId);
       this.localChanges.set(mapping.docId, relPath);
+      this.note("info", "push-queued", "Changed on disk while closed — checking it against the server", {
+        docId: mapping.docId,
+        path: relPath,
+      });
       this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
       // A doc resident in the hot tier has a LIVE bridge, and its next egest (a
       // remote update landing) would overwrite the file's new bytes before the
@@ -1368,6 +1564,12 @@ export class SyncManager implements InboundHost {
             `If the folder was unmounted or checked out, reopening the vault restores them.`,
           "error",
         );
+        this.note(
+          "warn",
+          "bulk-delete-refused",
+          `${deletes.length} notes vanished from this folder at once — they were left on the server ` +
+            `in case the folder was unmounted or checked out`,
+        );
         for (const d of deletes) {
           this.registry.recordFailure({
             kind: "inbound",
@@ -1420,6 +1622,12 @@ export class SyncManager implements InboundHost {
           continue;
         }
         if (!scope.isCurrent()) return;
+        this.note(
+          "info",
+          "disk-delete",
+          `${d.relPath} was deleted on this device — removed from the server for everyone`,
+          { docId: d.docId, path: d.relPath },
+        );
         // The OPEN note keeps its bridge deliberately. The editor is still
         // mounted (the banner offers to close it), and destroying the Y.Doc
         // under CodeMirror throws on the next keystroke — which is why the
@@ -1563,6 +1771,10 @@ export class SyncManager implements InboundHost {
     // The file at the new path may hold edits made in the same breath as the
     // rename, and the note's row moved, so both surfaces need telling.
     this.localChanges.set(docId, to);
+    this.note("info", "push-queued", "Renamed on disk — re-sending it under the new name", {
+      docId,
+      path: to,
+    });
     this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
     this.onNotePathChanged?.(docId, from, to);
   }
@@ -1651,6 +1863,10 @@ export class SyncManager implements InboundHost {
       ingestFromFile: true,
       mustConnect: (docId) => this.divergedDocs.has(docId),
       progress,
+      // Most local-change runs are our own egest echoing back; the pill only
+      // says "Syncing" once a note actually needs the server.
+      lazyPhase: true,
+      onFailure: (f) => this.logUploadFailure(f),
       shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
     });
     this.uploader = uploader;
@@ -1920,6 +2136,13 @@ export class SyncManager implements InboundHost {
    */
   private handleServerBehind(docIds: string[], scope: VaultScope): void {
     if (!scope.isCurrent()) return;
+    if (docIds.length > 0) {
+      this.note(
+        "info",
+        "server-behind",
+        `${docIds.length} ${docIds.length === 1 ? "note has" : "notes have"} edits the server never received`,
+      );
+    }
     this.serverBehind = new Set(docIds);
     for (const docId of docIds) this.divergedDocs.add(docId);
   }
@@ -1936,6 +2159,13 @@ export class SyncManager implements InboundHost {
   private handleServerEmpty(docIds: string[], truncated: boolean, scope: VaultScope): void {
     if (!scope.isCurrent()) return;
     this.clearChannelWatchdog(); // `ready` arrived — the channel is alive
+    if (docIds.length > 0) {
+      this.note(
+        "info",
+        "server-empty",
+        `Server asked for the content of ${docIds.length} ${docIds.length === 1 ? "note" : "notes"}`,
+      );
+    }
     this.serverEmptyTruncated = truncated;
     // A live run keeps its queue and picks this set up on its next pass; only
     // the set is refreshed here. The refresh itself may need the disk (see
@@ -2086,7 +2316,10 @@ export class SyncManager implements InboundHost {
     // phase is visible from its first item — that phase alone is minutes of work
     // on a large vault, and it used to report nothing at all.
     const progress = new SyncProgressReporter({
-      onProgress: (p) => this.onSyncProgress?.(p),
+      onProgress: (p) => {
+        this.logRunPhase(p);
+        this.onSyncProgress?.(p);
+      },
       onDocState: (patch) => this.onDocState?.(patch),
     });
     this.progress = progress;
@@ -2256,6 +2489,12 @@ export class SyncManager implements InboundHost {
     this.permanentFailures.delete(docId);
     this.registry.unmarkPushed(docId);
     this.divergedDocs.add(docId);
+    this.note(
+      "info",
+      "reset-history",
+      `Cleared the saved edit history for ${relPath} and re-sent it from the file`,
+      { docId, path: relPath },
+    );
     console.info(
       `[sync] reset history for ${relPath}: ` +
         `${(bytesBefore / (1024 * 1024)).toFixed(1)} MB → ` +
@@ -2296,6 +2535,7 @@ export class SyncManager implements InboundHost {
     if (!this.enabled || !scope || !scope.isCurrent()) return;
     const relPath = this.registry.pathForDocId(docId);
     if (!relPath) return;
+    this.note("info", "retry", "Retrying this note", { docId, path: relPath });
     this.permanentFailures.delete(docId);
     this.registry.unmarkPushed(docId);
     this.divergedDocs.add(docId);
@@ -2317,6 +2557,7 @@ export class SyncManager implements InboundHost {
     const scope = this.scope;
     if (!this.enabled || !scope || !scope.isCurrent()) return;
     if (this.uploader?.isRunning()) return;
+    this.note("info", "retry", "Sync now requested");
     // The old uploader's failure list belongs to the run being retried; keeping
     // it would let `completeRun` re-report failures the retry just fixed.
     this.uploader = null;
@@ -2400,6 +2641,7 @@ export class SyncManager implements InboundHost {
       // Never touch the open note: its editor session owns a provider for that doc.
       skip: (docId) => store.suppressedDoc() === docId,
       progress,
+      onFailure: (f) => this.logUploadFailure(f),
       shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
     });
     this.uploader = uploader;
@@ -2446,10 +2688,22 @@ export class SyncManager implements InboundHost {
     this.armChannelWatchdog(scope);
     // Opens at 0/0 ("Syncing…"), because this now runs the moment the engine is
     // started — before its socket is even open, let alone `hello`ed. There is
-    // deliberately no `backfillSettled()` short-circuit here any more: an engine
+    // deliberately no bare `backfillSettled()` short-circuit here: an engine
     // that has not connected yet reports settled (nothing is queued and no window
-    // is open), so checking it here would end the phase before it began.
+    // is open), so checking it alone would end the phase before it began.
     progress.phase("downloading", total - done);
+    // …but the channel can also be AHEAD of us. In the prime window it starts
+    // before the reconcile, and on a small vault its `ready` and the idle edge
+    // both land while the reconcile is still running — so the one event that
+    // ends this phase (`handleInboundIdle`) fired before the phase existed, the
+    // watchdog stands down because the channel is healthy, and the pill said
+    // "Syncing" until some teammate's keystroke happened to drain a frame. A
+    // synced channel whose backfill is settled has already delivered the edge;
+    // take it now. `vaultStatus === "synced"` is what makes the check safe: an
+    // unconnected engine never reports synced, only settled.
+    if (this.vaultStatus === "synced" && engine.backfillSettled()) {
+      this.handleInboundIdle(scope);
+    }
   }
 
   private armChannelWatchdog(scope: VaultScope): void {
@@ -2530,6 +2784,44 @@ export class SyncManager implements InboundHost {
     progress.flush();
   }
 
+  /**
+   * ONE doc's position in the sync layer, as five facts it already holds.
+   *
+   * The Health page's "Check a note" box, and the reason it can be honest: every
+   * field here is read, never inferred. They disagree with each other on purpose
+   * — `pushed` without `queued` is a settled note, `pushed` WITH `diverged` is a
+   * note whose local edits may never have left, and `emptyEverywhere` is the one
+   * combination where "not pushed" is not a problem at all.
+   *
+   * Scope-safe: with no live vault every answer is the honest empty one rather
+   * than a leftover from the vault we left.
+   */
+  inspectDoc(docId: string): {
+    pushed: boolean;
+    queued: boolean;
+    diverged: boolean;
+    permanentFailure: string | null;
+    emptyEverywhere: boolean;
+  } {
+    const scope = this.scope;
+    if (!scope || !scope.isCurrent()) {
+      return {
+        pushed: false,
+        queued: false,
+        diverged: false,
+        permanentFailure: null,
+        emptyEverywhere: false,
+      };
+    }
+    return {
+      pushed: this.registry.isPushed(docId),
+      queued: this.localChanges.has(docId),
+      diverged: this.divergedDocs.has(docId),
+      permanentFailure: this.permanentFailures.get(docId)?.reason ?? null,
+      emptyEverywhere: this.emptyEverywhere.has(docId),
+    };
+  }
+
   /** Everything the current run could not sync — registry rows and note content. */
   syncFailures(): {
     registry: ReturnType<VaultRegistry["failures"]>;
@@ -2596,6 +2888,11 @@ export class SyncManager implements InboundHost {
       this.presenceRepushTimer = null;
     }
     this.vaultStatus = "idle";
+    // The timeline describes the vault we are leaving; keeping it would explain
+    // the next vault's state with the previous one's history. The SyncLog object
+    // itself survives, so a subscriber's unsubscribe stays valid (see the field).
+    this.log.clear();
+    this.loggedPhase = null;
     // Timers first: a timer that fires after we've cleared the state below would
     // still see a live `registry`/`attachments` and act on the wrong vault.
     if (this.registryPullTimer) {
@@ -2903,6 +3200,10 @@ export class SyncManager implements InboundHost {
         const relPath = this.registry.pathForDocId(docId);
         if (relPath) {
           this.localChanges.set(docId, relPath);
+          this.note("info", "push-queued", "Merged an edit made outside Baalda — sending the result", {
+            docId,
+            path: relPath,
+          });
           this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
         }
       },

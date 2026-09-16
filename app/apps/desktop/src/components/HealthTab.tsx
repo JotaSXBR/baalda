@@ -1,49 +1,41 @@
 /* Vault Settings → Health. The page that answers, in this order: is my work
-   safe, where exactly does the pipeline stop, what do I have to do about it,
-   and what is in this vault.
+   safe, where exactly does the pipeline stop, WHY, what do I do about it, what
+   did Baalda verify about these files, and what is in this vault.
 
    Split in two on purpose. `HealthTab` is the container: it owns the hook, the
-   upgrade dialog and nothing else. `HealthView` is pure — hand it a
-   `VaultHealthSnapshot` and it renders, which is what lets a fixture drive it
-   without a vault, a server or a Tauri host underneath.
+   note list the inspector completes against, and the upgrade dialog.
+   `HealthView` is pure — hand it a `VaultHealthSnapshot` and it renders, which
+   is what lets a fixture drive it without a vault, a server or a Tauri host
+   underneath.
+
+   The sections live in `HealthIssues`, `HealthChecks`, `HealthInspector`,
+   `HealthTimeline` and `HealthStats`; this file owns the layout, the verdict
+   card, the pipeline strip, the sync bar and every destructive confirm. The
+   confirms live HERE rather than inside the row that raised them, so a row
+   unmounting mid-dialog — a refresh landing, a filter changing — cannot take
+   the dialog with it.
 
    The whole page has to survive a vault that has never synced: `report.counts`
    is null, the last two pipeline stages are `off`, and the analytics below are
    still the point. Nothing here may assume a server. */
-import { useEffect, useMemo, useState } from "react";
-import type {
-  HealthActions,
-  HealthIssue,
-  HealthStage,
-  HistoryFootprint,
-  SizedFile,
-  VaultHealthSnapshot,
-  VaultStats,
-} from "../lib/health/types";
+import { useEffect, useState } from "react";
+import { useStore } from "../store";
+import type { NoteTitle } from "../lib/ipc";
+import type { HealthStage, HealthStageId, VaultHealthSnapshot } from "../lib/health/types";
 import { useVaultHealth } from "../lib/health/useVaultHealth";
-import {
-  formatBytes,
-  middleTruncate,
-  relativeTime,
-  verdictLabel,
-  verdictTone,
-} from "../lib/health/format";
-import { MAX_NOTE_BYTES } from "../lib/sync/contentUpload";
+import { formatBytes, verdictLabel, verdictTone } from "../lib/health/format";
 import { toast } from "../lib/toast";
 import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { UpgradeDialog } from "./UpgradeDialog";
+import { HealthIssues } from "./HealthIssues";
+import { HealthChecks, type CheckFocus } from "./HealthChecks";
+import { useHealthIgnores } from "../lib/health/useHealthIgnores";
+import { HealthInspector } from "./HealthInspector";
+import { HealthTimeline } from "./HealthTimeline";
+import { HealthActivity, HealthLargest, HealthStats } from "./HealthStats";
+import { Section, type ConfirmState, type HealthHandlers } from "./HealthShared";
 import "./health.css";
-
-/** Amber before the hard ceiling: a note this size is one paste from being
- *  refused, and the warning is only useful while it can still be acted on. */
-const NOTE_WARN_BYTES = 8 * 1024 * 1024;
-
-/** Past this many issues the list needs a way to narrow itself. */
-const FILTER_AT = 5;
-
-/** Characters of a path that fit on one row before the middle is elided. */
-const PATH_CHARS = 52;
 
 export interface HealthTabProps {
   /** Open the plan dialog. Omitted ⇒ this tab raises its own, like Billing. */
@@ -70,11 +62,18 @@ export function HealthTab({
     onOpenUpgrade: onOpenUpgrade ?? (() => setUpgradeOpen(true)),
     onRequestSignIn,
   });
+  // The one store read on this page, and it stays in the CONTAINER so
+  // `HealthView` keeps rendering from nothing but its props — a fixture, in the
+  // tests.
+  const notes = useStore((s) => s.titles);
+  const vaultPath = useStore((s) => s.vault?.path ?? null);
 
   return (
     <>
       <HealthView
         snapshot={snapshot}
+        notes={notes}
+        vaultPath={vaultPath}
         onGoToGeneral={onGoToGeneral}
         onClose={onClose}
       />
@@ -85,20 +84,21 @@ export function HealthTab({
 
 // ── The page ──────────────────────────────────────────────────────────────────
 
-type ConfirmState =
-  | { kind: "delete"; path: string }
-  | { kind: "reset"; docId: string; path: string | null };
-
 export function HealthView({
   snapshot,
+  notes = [],
+  vaultPath = null,
   onGoToGeneral,
   onClose,
 }: {
   snapshot: VaultHealthSnapshot;
+  notes?: NoteTitle[];
+  /** Keys the per-vault ignore list; null ⇒ nothing is remembered. */
+  vaultPath?: string | null;
   onGoToGeneral?: () => void;
   onClose?: () => void;
 }) {
-  const { report, stats, statsError, loading, refresh, actions } = snapshot;
+  const { report, stats, checks, statsError, loading, log, refresh, actions } = snapshot;
   // Relative times go stale while the dialog sits open; a slow tick is enough
   // and costs one render a minute.
   const [now, setNow] = useState(() => Date.now());
@@ -108,128 +108,287 @@ export function HealthView({
   }, []);
 
   const [confirming, setConfirming] = useState<ConfirmState | null>(null);
+  const [focusIssue, setFocusIssue] = useState<string | null>(null);
+  const [focusCheck, setFocusCheck] = useState<CheckFocus | null>(null);
+  const ignores = useHealthIgnores(vaultPath);
+  const [inspectRequest, setInspectRequest] = useState<{ path: string; n: number } | null>(
+    null,
+  );
 
-  const openNote = (path: string) => {
-    actions.openNote(path);
-    // The note is behind the settings card; leaving it open would look like
-    // nothing happened.
-    onClose?.();
-  };
-
-  const reclaim = async () => {
-    const { docsRemoved, bytesReclaimed } = await actions.reclaimOrphans();
-    toast(
-      docsRemoved === 0
-        ? "Nothing to reclaim"
-        : `Reclaimed ${formatBytes(bytesReclaimed)} from ${docsRemoved.toLocaleString()} ` +
-            `orphan ${docsRemoved === 1 ? "doc" : "docs"}`,
-    );
+  const handlers: HealthHandlers = {
+    actions,
+    now,
+    confirm: setConfirming,
+    openNote(path) {
+      actions.openNote(path);
+      // The note is behind the settings card; leaving it open would look like
+      // nothing happened.
+      onClose?.();
+    },
+    async reclaim() {
+      const { docsRemoved, bytesReclaimed } = await actions.reclaimOrphans();
+      toast(
+        docsRemoved === 0
+          ? "Nothing to reclaim"
+          : `Reclaimed ${formatBytes(bytesReclaimed)} from ${docsRemoved.toLocaleString()} ` +
+              `orphan ${docsRemoved === 1 ? "doc" : "docs"}`,
+      );
+    },
   };
 
   return (
     <div className="health-tab">
-      <VerdictCard snapshot={snapshot} onRefresh={refresh} loading={loading} />
-
-      <Pipeline stages={report.stages} />
-
-      <div className="subhead">Sync</div>
-      {report.counts ? (
-        <SyncBreakdown counts={report.counts} />
-      ) : (
-        <div className="health-local-row">
-          <span className="muted">Sync is off for this folder.</span>
-          {onGoToGeneral && (
-            <button type="button" className="link-btn" onClick={onGoToGeneral}>
-              Turn on sync
-            </button>
-          )}
-        </div>
-      )}
-
-      <div className="subhead">Needs attention</div>
-      <IssueList
-        issues={report.issues}
-        actions={actions}
-        onOpenNote={openNote}
-        onConfirm={setConfirming}
-        onReclaim={reclaim}
+      <VerdictCard
+        snapshot={snapshot}
+        onRefresh={refresh}
+        loading={loading}
+        onGoToGeneral={onGoToGeneral}
       />
 
-      <div className="subhead">Vault at a glance</div>
-      <StatTiles
+
+      {/* The vault's numbers sit right under the verdict as one quiet strip:
+          they frame everything below ("15 notes, 259 KB") without competing
+          with it. */}
+      <HealthStats
         stats={stats}
         loading={loading}
         statsError={statsError}
-        onReclaim={reclaim}
+        handlers={handlers}
+        onFlag={(id) => {
+          // A flag the reader clicks is one they want to see, ignored or not.
+          ignores.restoreCheck(id);
+          setFocusCheck((f) => ({ id, n: (f?.n ?? 0) + 1 }));
+        }}
       />
+
+      <Pipeline stages={report.stages} />
+
+
+      <Section
+        title="Needs attention"
+        description="Open a row for the full reasoning."
+      >
+        <HealthIssues
+          issues={report.issues}
+          handlers={handlers}
+          syncEnabled={report.counts != null}
+          focusKey={focusIssue}
+          dismissed={ignores.issues}
+          onDismiss={ignores.dismissIssue}
+          onRestore={ignores.restoreIssue}
+        />
+      </Section>
+
+      <Section title="Check a note">
+        <HealthInspector
+          notes={notes}
+          handlers={handlers}
+          request={inspectRequest}
+          onShowIssue={setFocusIssue}
+        />
+      </Section>
+
+      <Section
+        title="Checks"
+        description="What Baalda verifies about the files in this vault."
+      >
+        <HealthChecks
+          checks={checks}
+          loading={loading}
+          handlers={handlers}
+          onRefresh={refresh}
+          ignored={ignores.checks}
+          onIgnore={ignores.ignoreCheck}
+          onRestore={ignores.restoreCheck}
+          focus={focusCheck}
+        />
+      </Section>
 
       {stats && (
         <>
-          <div className="subhead">Activity</div>
-          <Activity activity={stats.activity} />
+          <Section title="Activity">
+            <HealthActivity activity={stats.activity} />
+          </Section>
 
-          <div className="subhead">Largest</div>
-          <Largest
-            stats={stats}
-            now={now}
-            onOpenNote={openNote}
-            onReveal={actions.reveal}
-            onResetHistory={(docId, path) =>
-              setConfirming({ kind: "reset", docId, path })
-            }
-          />
+          <Section title="Largest">
+            <HealthLargest stats={stats} handlers={handlers} />
+          </Section>
         </>
       )}
 
-      {confirming?.kind === "delete" && (
-        <ConfirmDialog
-          title="Delete this note?"
-          confirmLabel="Delete"
-          onCancel={() => setConfirming(null)}
-          onConfirm={async () => {
-            await actions.deleteNote(confirming.path);
-            setConfirming(null);
-          }}
-        >
-          <p className="muted">
-            <code>{confirming.path}</code> is removed from this vault, and from
-            every device that syncs it. A vault checkpoint can bring it back.
-          </p>
-        </ConfirmDialog>
-      )}
-      {confirming?.kind === "reset" && (
-        <ConfirmDialog
-          title="Reset this note's history?"
-          confirmLabel="Reset history"
-          onCancel={() => setConfirming(null)}
-          onConfirm={async () => {
-            const { bytesFreed } = await actions.resetHistory(confirming.docId);
-            setConfirming(null);
-            toast(`History reset · ${formatBytes(bytesFreed)} freed`);
-          }}
-        >
-          <p className="muted">
-            {confirming.path ? <code>{confirming.path}</code> : "This document"}{" "}
-            starts over from the file on disk. The text you have now is kept, but
-            the edit history behind it is discarded on every device, and undo
-            cannot reach past this point.
-          </p>
-        </ConfirmDialog>
-      )}
+      <Section
+        title="Timeline"
+        description="What the sync layer has done since this app launched."
+      >
+        <HealthTimeline
+          log={log}
+          now={now}
+          onInspect={(path) => setInspectRequest((r) => ({ path, n: (r?.n ?? 0) + 1 }))}
+        />
+      </Section>
+
+      <Confirms
+        confirming={confirming}
+        onDone={() => setConfirming(null)}
+        actions={actions}
+      />
     </div>
   );
 }
 
+// ── Confirms ──────────────────────────────────────────────────────────────────
+
+/** Every irreversible action on the page, in one place. Each one names what it
+ *  will do to the file in front of the reader rather than to "the document". */
+function Confirms({
+  confirming,
+  onDone,
+  actions,
+}: {
+  confirming: ConfirmState | null;
+  onDone: () => void;
+  actions: VaultHealthSnapshot["actions"];
+}) {
+  if (!confirming) return null;
+
+  switch (confirming.kind) {
+    case "delete":
+      return (
+        <ConfirmDialog
+          title="Delete this note?"
+          confirmLabel="Delete"
+          onCancel={onDone}
+          onConfirm={async () => {
+            await actions.deleteNote(confirming.path);
+            onDone();
+          }}
+        >
+          <p className="muted">
+            <code>{confirming.path}</code> is removed from this vault, and from every
+            device that syncs it. A vault checkpoint can bring it back.
+          </p>
+        </ConfirmDialog>
+      );
+    case "reset":
+      return (
+        <ConfirmDialog
+          title="Reset this note's history?"
+          confirmLabel="Reset history"
+          onCancel={onDone}
+          onConfirm={async () => {
+            const { bytesFreed } = await actions.resetHistory(confirming.docId);
+            onDone();
+            toast(`History reset · ${formatBytes(bytesFreed)} freed`);
+          }}
+        >
+          <p className="muted">
+            {confirming.path ? <code>{confirming.path}</code> : "This document"} starts over
+            from the file on disk. The text you have now is kept, but the edit history
+            behind it is discarded on every device, and undo cannot reach past this point.
+          </p>
+        </ConfirmDialog>
+      );
+    case "reregister":
+      return (
+        <ConfirmDialog
+          title="Put this file back on the server?"
+          confirmLabel="Re-register"
+          tone="accent"
+          onCancel={onDone}
+          onConfirm={async () => {
+            await actions.reregister(confirming.path);
+            onDone();
+            toast("Registered — its content is uploading now");
+          }}
+        >
+          <p className="muted">
+            Registers <code>{confirming.path}</code> with the server as a note again and
+            uploads its content. Everyone with access to this vault will see it.
+          </p>
+        </ConfirmDialog>
+      );
+    case "empty-trash":
+      return (
+        <ConfirmDialog
+          title="Empty the recovery copies?"
+          confirmLabel="Empty trash"
+          onCancel={onDone}
+          onConfirm={async () => {
+            const { filesRemoved, bytesFreed } = await actions.emptyTrash();
+            onDone();
+            toast(
+              filesRemoved === 0
+                ? "Nothing to empty"
+                : `Removed ${filesRemoved.toLocaleString()} ${
+                    filesRemoved === 1 ? "copy" : "copies"
+                  } · ${formatBytes(bytesFreed)} freed`,
+            );
+          }}
+        >
+          <p className="muted">
+            Baalda keeps a copy of every note it deletes. Emptying them frees the space and
+            removes your safety net for those deletes. Notes still in the vault are
+            untouched.
+          </p>
+        </ConfirmDialog>
+      );
+    case "rebuild-index":
+      return (
+        <ConfirmDialog
+          title="Rebuild the search index?"
+          confirmLabel="Rebuild"
+          tone="accent"
+          onCancel={onDone}
+          onConfirm={async () => {
+            await actions.rebuildIndex();
+            onDone();
+            toast("Index rebuilt");
+          }}
+        >
+          <p className="muted">
+            Reads every note again and builds search, tags and backlinks from scratch.
+            Search may be briefly incomplete while it runs. Your notes are not touched.
+          </p>
+        </ConfirmDialog>
+      );
+  }
+}
+
 // ── Verdict ───────────────────────────────────────────────────────────────────
+
+/**
+ * Pull the trailing " · <host>" the model folds into `detail` back out, so the
+ * card can set it as a quiet mono chip instead of ending a plain sentence in
+ * "…baalda-production.up.railway.app.". The model keeps owning the wording;
+ * this only decides where the host is painted.
+ */
+export function splitHost(
+  detail: string,
+  host: string | null,
+): { text: string; host: string | null } {
+  if (!host) return { text: detail, host: null };
+  const needle = ` · ${host}`;
+  const at = detail.lastIndexOf(needle);
+  if (at < 0) return { text: detail, host: null };
+  const text = (detail.slice(0, at) + detail.slice(at + needle.length))
+    // The host sometimes sits between a sentence's own full stop and the one
+    // the template adds, which leaves ".." behind once it is lifted out.
+    .replace(/\s*\.\s*\.\s*$/, ".")
+    .trim();
+  return { text, host };
+}
 
 function VerdictCard({
   snapshot,
   onRefresh,
   loading,
+  onGoToGeneral,
 }: {
   snapshot: VaultHealthSnapshot;
   onRefresh: () => void;
   loading: boolean;
+  /** Where sync is turned on; a local vault's primary button leads there. */
+  onGoToGeneral?: () => void;
 }) {
   const { report, actions } = snapshot;
   const [copied, setCopied] = useState(false);
@@ -240,6 +399,7 @@ function VerdictCard({
   // remedy), so the way back in lives here: there is no sync run to retry until
   // a session exists, and a disabled "Sync now" would say nothing about why.
   const signedOut = report.verdict === "signed-out";
+  const { text, host } = splitHost(report.detail, report.serverHost);
 
   const copy = async () => {
     await actions.copyDiagnostics();
@@ -254,10 +414,14 @@ function VerdictCard({
           {verdictLabel(report.verdict)}
         </span>
         <h3 className="health-headline">{report.headline}</h3>
-        {/* The model already folds "Last confirmed …" and the server host into
-            `detail` (see `model.ts` → `describe`), so the card prints it
-            verbatim rather than assembling a second, contradictory version. */}
-        <p className="health-detail">{report.detail}</p>
+        {/* The model already folds "Last confirmed …" into `detail` (see
+            `model.ts` → `describe`), so the card prints it verbatim rather than
+            assembling a second, contradictory version. Only the server host is
+            lifted out, and only to be set as a chip. */}
+        <p className="health-detail">
+          {text}
+          {host && <span className="health-host">{host}</span>}
+        </p>
       </div>
       <div className="health-verdict-actions">
         {signedOut ? (
@@ -268,17 +432,19 @@ function VerdictCard({
           >
             Sign in
           </button>
+        ) : local && onGoToGeneral ? (
+          // A local folder has nothing to sync "now"; the useful button is the
+          // one that turns sync on, which lives on the General tab.
+          <button type="button" className="primary sm" onClick={onGoToGeneral}>
+            Turn on sync
+          </button>
         ) : (
           <AsyncButton
             className="primary sm"
             spinnerTone="on-accent"
             disabled={syncing || local}
             title={
-              local
-                ? "This folder does not sync"
-                : syncing
-                  ? "Already syncing"
-                  : undefined
+              local ? "This folder does not sync" : syncing ? "Already syncing" : undefined
             }
             onClick={() => actions.syncNow()}
           >
@@ -301,7 +467,7 @@ function VerdictCard({
   );
 }
 
-// ── Pipeline diagram ──────────────────────────────────────────────────────────
+// ── Pipeline strip ────────────────────────────────────────────────────────────
 
 /** A stage that is `off` is not a fault — a local vault's connection and server
  *  nodes are simply not in play — so the diagnosis walks past it looking for the
@@ -310,52 +476,84 @@ function isSettled(stage: HealthStage): boolean {
   return stage.state === "ok" || stage.state === "off";
 }
 
-function Pipeline({ stages }: { stages: HealthStage[] }) {
+/** The two stages that are normally NOISE. Nobody opens this page to be told
+ *  the local index holds nineteen rows; they open it because something is not
+ *  on the server. So these appear only when they are the thing that is wrong,
+ *  in their natural position, marked as surfaced deliberately. */
+const CONDITIONAL: ReadonlySet<HealthStageId> = new Set<HealthStageId>([
+  "index",
+  "history",
+]);
+
+/** The page's own words. The model calls the last stage "Server"; on this page
+ *  it is the reader's own vault up there, not a machine. */
+const STAGE_LABELS: Partial<Record<HealthStageId, string>> = {
+  server: "Remote vault",
+};
+
+export function Pipeline({ stages }: { stages: HealthStage[] }) {
+  const shown = stages.filter((s) => !CONDITIONAL.has(s.id) || !isSettled(s));
   // The first unsettled stage is where the pipeline stops; -1 when everything
   // that can be confirmed is confirmed.
-  const focus = stages.findIndex((s) => !isSettled(s));
+  const focus = shown.findIndex((s) => !isSettled(s));
   const [picked, setPicked] = useState<number | null>(null);
   // A pick survives until the diagnosis itself moves, so re-reading a stage
   // does not fight the auto-focus on the next poll.
   useEffect(() => setPicked(null), [focus]);
 
-  const shown = picked ?? (focus >= 0 ? focus : stages.length - 1);
-  const legend = stages[shown];
-  if (stages.length === 0) return null;
+  if (shown.length === 0) return null;
+  const at = picked ?? (focus >= 0 ? focus : shown.length - 1);
+  const legend = shown[at];
+  // The line under the strip restates the highlighted card's own number on a
+  // healthy vault ("19" in the card, "19 notes and 3 folders…" below it), so it
+  // only appears when it has something the card does not: a stage that is
+  // actually degraded, or one the reader asked about by clicking it.
+  const showLegend = legend != null && (picked != null || !isSettled(legend));
 
   return (
     <div className="health-pipeline-wrap">
       <ol className="health-pipeline" aria-label="Sync pipeline">
-        {stages.map((stage, i) => (
-          <li key={stage.id} className="health-stage-cell">
-            {i > 0 && (
-              <span
-                className="health-edge"
-                data-state={stages[i].state}
-                data-broken={i === focus ? "" : undefined}
-                aria-hidden="true"
-              />
-            )}
-            <button
-              type="button"
-              className="health-node"
-              data-state={stage.state}
-              data-focus={i === focus ? "" : undefined}
-              data-picked={i === shown ? "" : undefined}
-              title={stage.detail}
-              aria-current={i === shown ? "step" : undefined}
-              onClick={() => setPicked(i)}
-            >
-              <span className="health-node-dot" aria-hidden="true" />
-              <span className="health-node-label">{stage.label}</span>
-              <span className="health-node-headline">{stage.headline}</span>
-            </button>
-          </li>
-        ))}
+        {shown.map((stage, i) => {
+          const conditional = CONDITIONAL.has(stage.id);
+          return (
+            <li key={stage.id} className="health-stage-cell">
+              {i > 0 && (
+                <span
+                  className="health-edge"
+                  data-state={stage.state}
+                  data-broken={i === focus ? "" : undefined}
+                  aria-hidden="true"
+                />
+              )}
+              <button
+                type="button"
+                className="health-node"
+                data-state={stage.state}
+                data-focus={i === focus ? "" : undefined}
+                data-picked={i === at ? "" : undefined}
+                data-conditional={conditional ? "" : undefined}
+                title={stage.detail}
+                aria-current={i === at ? "step" : undefined}
+                onClick={() => setPicked(i)}
+              >
+                <span className="health-node-top">
+                  <span className="health-node-dot" aria-hidden="true" />
+                  <span className="health-node-label">
+                    {STAGE_LABELS[stage.id] ?? stage.label}
+                  </span>
+                </span>
+                <span className="health-node-headline">{stage.headline}</span>
+                {conditional && (
+                  <span className="health-node-note">shown because it needs attention</span>
+                )}
+              </button>
+            </li>
+          );
+        })}
       </ol>
-      {legend && (
+      {showLegend && (
         <p className="health-legend" data-state={legend.state}>
-          <strong>{legend.label}</strong> {legend.detail}
+          <strong>{STAGE_LABELS[legend.id] ?? legend.label}</strong> {legend.detail}
         </p>
       )}
     </div>
@@ -364,589 +562,3 @@ function Pipeline({ stages }: { stages: HealthStage[] }) {
 
 // ── Sync breakdown ────────────────────────────────────────────────────────────
 
-function SyncBreakdown({
-  counts,
-}: {
-  counts: NonNullable<VaultHealthSnapshot["report"]["counts"]>;
-}) {
-  const segments = [
-    { key: "synced", label: "Synced", value: counts.synced, tone: "good" },
-    { key: "pending", label: "Syncing", value: counts.pending, tone: "busy" },
-    { key: "failed", label: "Failed", value: counts.failed, tone: "bad" },
-    {
-      key: "unsynced",
-      label: "Not on server",
-      value: counts.unsynced,
-      tone: "warn",
-    },
-    // The fifth segment is what keeps the bar honest: a mapped note nobody has
-    // reported on yet is neither synced nor failed, and folding it into either
-    // would make the bar claim something the sync layer has not said.
-    {
-      key: "unreported",
-      label: "Not confirmed yet",
-      value: counts.unreported,
-      tone: "muted",
-    },
-  ].filter((s) => s.value > 0);
-
-  // Widths come off the segments' own sum, not `total`, so the bar always fills
-  // its track even if the tallies disagree by a note.
-  const sum = segments.reduce((n, s) => n + s.value, 0);
-  const pct =
-    counts.total > 0 ? Math.floor((counts.synced / counts.total) * 100) : 100;
-
-  return (
-    <div className="health-breakdown">
-      <div
-        className="health-bar"
-        role="img"
-        aria-label={`${counts.synced.toLocaleString()} of ${counts.total.toLocaleString()} notes synced`}
-      >
-        {sum === 0 ? (
-          <span className="health-bar-seg" data-tone="muted" style={{ width: "100%" }} />
-        ) : (
-          segments.map((s) => (
-            <span
-              key={s.key}
-              className="health-bar-seg"
-              data-tone={s.tone}
-              style={{ width: `${(s.value / sum) * 100}%` }}
-              title={`${s.label} · ${s.value.toLocaleString()}`}
-            />
-          ))
-        )}
-      </div>
-      <p className="health-bar-caption">
-        {pct}% of {counts.total.toLocaleString()}{" "}
-        {counts.total === 1 ? "note" : "notes"} confirmed on the server
-      </p>
-      <ul className="health-legend-list">
-        {segments.map((s) => (
-          <li key={s.key}>
-            <span className="health-swatch" data-tone={s.tone} aria-hidden="true" />
-            {s.label}
-            <strong>{s.value.toLocaleString()}</strong>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-// ── Issues ────────────────────────────────────────────────────────────────────
-
-type IssueFilter = "all" | "error" | "warn";
-
-function IssueList({
-  issues,
-  actions,
-  onOpenNote,
-  onConfirm,
-  onReclaim,
-}: {
-  issues: HealthIssue[];
-  actions: HealthActions;
-  onOpenNote: (path: string) => void;
-  onConfirm: (c: ConfirmState) => void;
-  onReclaim: () => Promise<void>;
-}) {
-  const [filter, setFilter] = useState<IssueFilter>("all");
-  const shown = useMemo(
-    () => (filter === "all" ? issues : issues.filter((i) => i.severity === filter)),
-    [issues, filter],
-  );
-
-  if (issues.length === 0) {
-    return (
-      <div className="health-empty">
-        <svg
-          viewBox="0 0 24 24"
-          width="18"
-          height="18"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          aria-hidden="true"
-        >
-          <path d="M20 6 9 17l-5-5" />
-        </svg>
-        Nothing needs attention
-      </div>
-    );
-  }
-
-  const errors = issues.filter((i) => i.severity === "error").length;
-
-  return (
-    <>
-      {issues.length > FILTER_AT && (
-        <div className="health-chips" role="group" aria-label="Filter issues">
-          {(
-            [
-              ["all", `All ${issues.length}`],
-              ["error", `Errors ${errors}`],
-              ["warn", `Warnings ${issues.length - errors}`],
-            ] as Array<[IssueFilter, string]>
-          ).map(([id, label]) => (
-            <button
-              key={id}
-              type="button"
-              className={`health-chip${filter === id ? " active" : ""}`}
-              aria-pressed={filter === id}
-              onClick={() => setFilter(id)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
-      {shown.length === 0 ? (
-        <div className="muted perm-empty">Nothing in this category.</div>
-      ) : (
-        <ul className="health-issues">
-          {shown.map((issue) => (
-            <IssueRow
-              key={issue.key}
-              issue={issue}
-              actions={actions}
-              onOpenNote={onOpenNote}
-              onConfirm={onConfirm}
-              onReclaim={onReclaim}
-            />
-          ))}
-        </ul>
-      )}
-    </>
-  );
-}
-
-function IssueRow({
-  issue,
-  actions,
-  onOpenNote,
-  onConfirm,
-  onReclaim,
-}: {
-  issue: HealthIssue;
-  actions: HealthActions;
-  onOpenNote: (path: string) => void;
-  onConfirm: (c: ConfirmState) => void;
-  onReclaim: () => Promise<void>;
-}) {
-  return (
-    <li className="health-issue" data-severity={issue.severity}>
-      <span className="health-dot" data-severity={issue.severity} aria-hidden="true" />
-      <div className="health-issue-main">
-        <span className="health-issue-title">{issue.title}</span>
-        {issue.path && (
-          <span className="health-path" title={issue.path}>
-            {middleTruncate(issue.path, PATH_CHARS)}
-          </span>
-        )}
-        <span className="health-why">{issue.why}</span>
-      </div>
-      <div className="health-issue-actions">
-        {issue.remedies.map((remedy) => {
-          switch (remedy) {
-            case "retry":
-              return issue.docId ? (
-                <AsyncButton
-                  key={remedy}
-                  className="ghost-pill sm"
-                  onClick={() => actions.retryDoc(issue.docId as string)}
-                >
-                  Retry
-                </AsyncButton>
-              ) : null;
-            case "open":
-              return issue.path ? (
-                <button
-                  key={remedy}
-                  type="button"
-                  className="link-btn"
-                  onClick={() => onOpenNote(issue.path as string)}
-                >
-                  Open
-                </button>
-              ) : null;
-            case "reveal":
-              return issue.path ? (
-                <AsyncButton
-                  key={remedy}
-                  className="link-btn"
-                  onClick={() => actions.reveal(issue.path as string)}
-                >
-                  Reveal
-                </AsyncButton>
-              ) : null;
-            case "delete":
-              return issue.path ? (
-                <button
-                  key={remedy}
-                  type="button"
-                  className="link-btn danger"
-                  onClick={() => onConfirm({ kind: "delete", path: issue.path as string })}
-                >
-                  Delete
-                </button>
-              ) : null;
-            case "upgrade":
-              return (
-                <button
-                  key={remedy}
-                  type="button"
-                  className="primary sm"
-                  onClick={() => actions.openUpgrade()}
-                >
-                  Upgrade
-                </button>
-              );
-            case "reset-history":
-              return issue.docId ? (
-                <button
-                  key={remedy}
-                  type="button"
-                  className="link-btn danger"
-                  onClick={() =>
-                    onConfirm({
-                      kind: "reset",
-                      docId: issue.docId as string,
-                      path: issue.path,
-                    })
-                  }
-                >
-                  Reset history
-                </button>
-              ) : null;
-            case "reclaim":
-              return (
-                <AsyncButton key={remedy} className="ghost-pill sm" onClick={onReclaim}>
-                  Reclaim
-                </AsyncButton>
-              );
-            case "sign-in":
-              return (
-                <button
-                  key={remedy}
-                  type="button"
-                  className="primary sm"
-                  onClick={() => actions.requestSignIn()}
-                >
-                  Sign in
-                </button>
-              );
-            default:
-              return null;
-          }
-        })}
-      </div>
-    </li>
-  );
-}
-
-// ── Vault at a glance ─────────────────────────────────────────────────────────
-
-function StatTiles({
-  stats,
-  loading,
-  statsError,
-  onReclaim,
-}: {
-  stats: VaultStats | null;
-  loading: boolean;
-  statsError: string | null;
-  onReclaim: () => Promise<void>;
-}) {
-  if (!stats) {
-    return (
-      <>
-        {statsError && <div className="auth-error">{statsError}</div>}
-        <ul className="health-tiles" aria-busy={loading || undefined}>
-          {Array.from({ length: 9 }, (_, i) => (
-            <li key={i} className="health-tile is-skeleton" aria-hidden="true">
-              <span className="health-tile-value" />
-              <span className="health-tile-label" />
-            </li>
-          ))}
-        </ul>
-        {!loading && !statsError && (
-          <p className="muted">These numbers are not available for this vault yet.</p>
-        )}
-      </>
-    );
-  }
-
-  const totalBytes =
-    stats.notes.bytes + stats.attachments.bytes + stats.otherFiles.bytes;
-  const tiles: Array<{ label: string; value: string; sub?: string }> = [
-    { label: "Notes", value: stats.notes.count.toLocaleString() },
-    { label: "Folders", value: stats.folders.toLocaleString() },
-    {
-      label: "Attachments",
-      value: stats.attachments.count.toLocaleString(),
-      sub: formatBytes(stats.attachments.bytes),
-    },
-    { label: "Tags", value: stats.tags.toLocaleString() },
-    {
-      label: "Links",
-      value: stats.links.toLocaleString(),
-      sub:
-        stats.brokenLinks > 0
-          ? `${stats.brokenLinks.toLocaleString()} broken`
-          : "none broken",
-    },
-    { label: "Empty notes", value: stats.notes.empty.toLocaleString() },
-    {
-      label: "Total size",
-      value: formatBytes(totalBytes),
-      sub:
-        stats.otherFiles.count > 0
-          ? `${stats.otherFiles.count.toLocaleString()} other files`
-          : undefined,
-    },
-    { label: "Index size", value: formatBytes(stats.index.bytes) },
-  ];
-
-  const orphans = stats.history.orphanDocs;
-
-  return (
-    <>
-      {statsError && <div className="auth-error">{statsError}</div>}
-      <ul className="health-tiles">
-        {tiles.map((t) => (
-          <li key={t.label} className="health-tile">
-            <span className="health-tile-value">{t.value}</span>
-            <span className="health-tile-label">{t.label}</span>
-            {t.sub && <span className="health-tile-sub">{t.sub}</span>}
-          </li>
-        ))}
-        <li className="health-tile">
-          <span className="health-tile-value">{formatBytes(stats.history.bytes)}</span>
-          <span className="health-tile-label">History size</span>
-          <span className="health-tile-sub">
-            {orphans > 0
-              ? `${orphans.toLocaleString()} orphan ${orphans === 1 ? "doc" : "docs"} · ${formatBytes(stats.history.orphanBytes)} reclaimable`
-              : `${stats.history.docs.toLocaleString()} docs · ${stats.history.updates.toLocaleString()} updates`}
-          </span>
-          {orphans > 0 && (
-            <AsyncButton className="ghost-pill sm health-tile-action" onClick={onReclaim}>
-              Reclaim
-            </AsyncButton>
-          )}
-        </li>
-      </ul>
-    </>
-  );
-}
-
-// ── Activity ──────────────────────────────────────────────────────────────────
-
-function Activity({ activity }: { activity: VaultStats["activity"] }) {
-  const weeks = activity.weeks ?? [];
-  const peak = Math.max(1, ...weeks);
-  const caption =
-    `${activity.modifiedLast7d.toLocaleString()} ${activity.modifiedLast7d === 1 ? "note" : "notes"} ` +
-    `edited in the last 7 days · ${activity.modifiedLast30d.toLocaleString()} in 30 days`;
-
-  return (
-    <div className="health-activity">
-      <div
-        className="health-bars"
-        role="img"
-        aria-label={`Notes edited per week over the last ${weeks.length} weeks: ${weeks.join(", ")}. ${caption}`}
-      >
-        {weeks.map((n, i) => (
-          <span
-            key={i}
-            className="health-week"
-            data-current={i === weeks.length - 1 ? "" : undefined}
-            style={{ height: `${Math.max(3, (n / peak) * 100)}%` }}
-            title={
-              i === weeks.length - 1
-                ? `This week · ${n.toLocaleString()}`
-                : `${weeks.length - 1 - i} ${weeks.length - 2 === i ? "week" : "weeks"} ago · ${n.toLocaleString()}`
-            }
-          />
-        ))}
-      </div>
-      <p className="health-detail">{caption}</p>
-    </div>
-  );
-}
-
-// ── Largest ───────────────────────────────────────────────────────────────────
-
-function sizeBadge(bytes: number): "bad" | "warn" | null {
-  if (bytes >= MAX_NOTE_BYTES) return "bad";
-  if (bytes >= NOTE_WARN_BYTES) return "warn";
-  return null;
-}
-
-function fileName(path: string): string {
-  const cut = path.lastIndexOf("/");
-  return cut >= 0 ? path.slice(cut + 1) : path;
-}
-
-function Largest({
-  stats,
-  now,
-  onOpenNote,
-  onReveal,
-  onResetHistory,
-}: {
-  stats: VaultStats;
-  now: number;
-  onOpenNote: (path: string) => void;
-  onReveal: (path: string) => Promise<void>;
-  onResetHistory: (docId: string, path: string | null) => void;
-}) {
-  return (
-    <div className="health-largest">
-      <LargestFiles
-        title="Largest notes"
-        rows={stats.largestNotes}
-        now={now}
-        empty="No notes yet."
-        onReveal={onReveal}
-        onOpenNote={onOpenNote}
-      />
-      <LargestFiles
-        title="Largest files"
-        rows={stats.largestFiles}
-        now={now}
-        empty="No attachments or other files."
-        onReveal={onReveal}
-      />
-      <section className="health-table-block">
-        <h4 className="health-table-title">Heaviest history</h4>
-        {stats.heaviestHistory.length === 0 ? (
-          <p className="muted">No local edit history yet.</p>
-        ) : (
-          <table className="health-table">
-            <thead>
-              <tr>
-                <th scope="col">Note</th>
-                <th scope="col" className="health-num">
-                  Updates
-                </th>
-                <th scope="col" className="health-num">
-                  Size
-                </th>
-                <th scope="col" aria-label="Actions" />
-              </tr>
-            </thead>
-            <tbody>
-              {stats.heaviestHistory.map((row: HistoryFootprint) => (
-                <tr key={row.docId}>
-                  <td>
-                    {row.path ? (
-                      <span className="health-path" title={row.path}>
-                        {middleTruncate(row.path, PATH_CHARS)}
-                      </span>
-                    ) : (
-                      <span className="muted">orphan · {row.docId.slice(0, 8)}</span>
-                    )}
-                  </td>
-                  <td className="health-num">{row.updates.toLocaleString()}</td>
-                  <td className="health-num">{formatBytes(row.bytes)}</td>
-                  <td className="health-row-actions">
-                    {row.path && (
-                      <button
-                        type="button"
-                        className="link-btn danger"
-                        onClick={() => onResetHistory(row.docId, row.path)}
-                      >
-                        Reset history
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
-    </div>
-  );
-}
-
-function LargestFiles({
-  title,
-  rows,
-  now,
-  empty,
-  onReveal,
-  onOpenNote,
-}: {
-  title: string;
-  rows: SizedFile[];
-  now: number;
-  empty: string;
-  onReveal: (path: string) => Promise<void>;
-  onOpenNote?: (path: string) => void;
-}) {
-  return (
-    <section className="health-table-block">
-      <h4 className="health-table-title">{title}</h4>
-      {rows.length === 0 ? (
-        <p className="muted">{empty}</p>
-      ) : (
-        <table className="health-table">
-          <thead>
-            <tr>
-              <th scope="col">Name</th>
-              <th scope="col" className="health-num">
-                Size
-              </th>
-              <th scope="col" className="health-num">
-                Modified
-              </th>
-              <th scope="col" aria-label="Actions" />
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => {
-              const badge = sizeBadge(row.bytes);
-              return (
-                <tr key={row.path}>
-                  <td>
-                    <span className="health-file-name">{fileName(row.path)}</span>
-                    <span className="health-path" title={row.path}>
-                      {middleTruncate(row.path, PATH_CHARS)}
-                    </span>
-                  </td>
-                  <td className="health-num">
-                    {formatBytes(row.bytes)}
-                    {badge && (
-                      <span className="health-size-badge" data-tone={badge}>
-                        {badge === "bad" ? "over the limit" : "near the limit"}
-                      </span>
-                    )}
-                  </td>
-                  <td className="health-num">{relativeTime(row.mtime, now)}</td>
-                  <td className="health-row-actions">
-                    {onOpenNote && (
-                      <button
-                        type="button"
-                        className="link-btn"
-                        onClick={() => onOpenNote(row.path)}
-                      >
-                        Open
-                      </button>
-                    )}
-                    <AsyncButton className="link-btn" onClick={() => onReveal(row.path)}>
-                      Reveal
-                    </AsyncButton>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-    </section>
-  );
-}

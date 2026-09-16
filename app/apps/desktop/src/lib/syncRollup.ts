@@ -20,7 +20,32 @@
 //     cost is linear in the number of path segments in the vault.
 
 import { isSafeAttachmentRelPath } from "./sync/attachments";
+import type { SyncStatus } from "./sync/syncManager";
 import type { DocSyncState } from "./sync/vaultScope";
+
+/**
+ * Should the sidebar draw per-note dots and folder counters at all?
+ *
+ * Only once the server has answered this session. Before that every note reads
+ * "not confirmed" for the same single reason — nothing could be confirmed — so
+ * the marks add no information to the corner pill's "Offline" and subtract a
+ * lot of calm: an offline launch showed a hollow dot on every note and "0/6"
+ * on every folder, which reads as six things wrong when nothing is. (The
+ * registry stamps notes `queued` as it tries to register them, and offline
+ * that stamp never resolves.) `read-only` counts as reached: the server spoke.
+ * The per-doc terminal states (`deleted`, `too-large`) are answers too.
+ */
+export function sidebarMarksVisible(status: SyncStatus): boolean {
+  switch (status) {
+    case "offline":
+    case "connecting":
+    case "error":
+    case "no-access":
+      return false;
+    default:
+      return true;
+  }
+}
 
 /** Rolled-up sync state of everything under one folder. */
 export interface FolderSyncSummary {

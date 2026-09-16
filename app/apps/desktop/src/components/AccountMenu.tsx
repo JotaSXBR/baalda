@@ -18,7 +18,7 @@ import { MenuIcon } from "./MenuIcon";
    access) and nothing in it is on the first screen, so all three dialogs load
    on demand. `null` is the right fallback for a modal: the popover stays put
    and the sheet arrives a beat later. */
-import type { SettingsTab } from "./VaultSettingsDialog";
+import type { SettingsTab } from "../lib/settingsTabs";
 const VaultSettingsDialog = lazy(() =>
   import("./VaultSettingsDialog").then((m) => ({ default: m.VaultSettingsDialog })),
 );
@@ -48,6 +48,10 @@ export function AccountMenu() {
   const syncEnabled = useStore((s) => s.syncEnabled);
   const activityStatus = useStore((s) => s.activityStatus);
   const vault = useStore((s) => s.vault);
+  // "Open Vault Settings on this page", asked for from anywhere in the app (the
+  // sync banner and the sync pill both point at Health). This component owns the
+  // only settings dialog, so it is the only place that can answer.
+  const settingsRequest = useStore((s) => s.settingsRequest);
 
   const [open, setOpen] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
@@ -94,6 +98,17 @@ export function AccountMenu() {
       alive = false;
     };
   }, [authStatus, vaultPath]);
+
+  // A new token means a NEW request, including a repeat of the tab already
+  // showing — which is why the dialog below is keyed on it: `initialTab` is read
+  // once, on mount, so a request that arrives while settings are already open
+  // has to remount the dialog to land on its page.
+  useEffect(() => {
+    if (!settingsRequest) return;
+    setOpen(false);
+    setSettingsTab(settingsRequest.tab);
+    setMembersOpen(true);
+  }, [settingsRequest]);
 
   // Close the popover on outside click or Escape.
   useEffect(() => {
@@ -200,6 +215,7 @@ export function AccountMenu() {
         {membersOpen && (
           <Suspense fallback={null}>
             <VaultSettingsDialog
+              key={settingsRequest?.token ?? 0}
               onClose={() => setMembersOpen(false)}
               onRequestSignIn={() => setAuthOpen(true)}
               initialTab={settingsTab}
@@ -293,6 +309,7 @@ export function AccountMenu() {
       {membersOpen && (
         <Suspense fallback={null}>
           <VaultSettingsDialog
+            key={settingsRequest?.token ?? 0}
             onClose={() => setMembersOpen(false)}
             initialTab={settingsTab}
           />

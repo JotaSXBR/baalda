@@ -49,18 +49,10 @@ import { ThemeToggle } from "./ThemeToggle";
 import { formatPrice, perLabel, UpgradeDialog } from "./UpgradeDialog";
 import { useKnownOrgIds, useLocalVaults } from "./useVaultLists";
 
-export type SettingsTab =
-  | "general"
-  | "health"
-  | "vaults"
-  | "members"
-  | "billing"
-  | "access"
-  | "mcp"
-  | "versioning"
-  | "import-export"
-  | "appearance"
-  | "updates";
+// Defined in `lib/settingsTabs.ts` so the store can name a tab without importing
+// this component; re-exported here so every existing importer is unchanged.
+export type { SettingsTab } from "../lib/settingsTabs";
+import type { SettingsTab } from "../lib/settingsTabs";
 
 // Sections that only make sense once the vault is synced to an org. On a
 // local vault they're shown but locked, with a "Turn on sync" gate.

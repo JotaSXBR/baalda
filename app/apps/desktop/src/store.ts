@@ -62,6 +62,7 @@ import {
 } from "./lib/prefs";
 import type { PropertiesMode } from "./lib/editor/frontmatter";
 import type { TreeSort } from "./lib/tree/sort";
+import type { SettingsTab } from "./lib/settingsTabs";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
 import { planTurnOnSync } from "./lib/vault/turnOnSync";
@@ -291,6 +292,16 @@ interface AppStore {
    */
   syncProgress: SyncProgress | null;
   /**
+   * Identity of the most recent bulk run that ENDED in failure — bumped once per
+   * fresh transition into the `error` phase, never while a run is moving.
+   *
+   * What makes the sync-issues banner dismissible per failure rather than per
+   * app launch: the banner remembers the token it was dismissed for, so the next
+   * failing run is a different number and raises it again. Vault-scoped like
+   * `syncProgress` (a failure in the vault you left is not news here).
+   */
+  failedRunToken: number;
+  /**
    * Per-doc sync state for the sidebar badge, keyed by **docId, never by path**
    * (paths change on rename and collide across vaults). Dropped on every vault
    * switch alongside `syncProgress`.
@@ -459,6 +470,16 @@ interface AppStore {
    */
   revealRequest: { path: string; edit: boolean; token: number } | null;
   requestReveal: (path: string, opts?: { edit?: boolean }) => void;
+  /**
+   * "Open Vault Settings on this page." Set by anything that wants to hand the
+   * user off to a settings tab — the sync banner and the sync pill both point at
+   * Health — and consumed by an effect in `AccountMenu`, which is the only place
+   * that owns the settings dialog. `token` makes a repeat request for the SAME
+   * tab re-fire, exactly like `revealRequest`: opening settings is an event, not
+   * a state.
+   */
+  settingsRequest: { tab: SettingsTab; token: number } | null;
+  requestSettings: (tab: SettingsTab) => void;
   /**
    * "The next time this note's editor mounts, put the cursor in its inline
    * title." Set by `createNoteIn`, consumed once by `InlineTitle` on mount.
@@ -1342,6 +1363,7 @@ function vaultScopedSyncReset() {
     syncStatus: "offline" as SyncStatus,
     syncPending: false,
     syncProgress: null,
+    failedRunToken: 0,
     docSyncState: {} as Record<string, DocSyncState>,
     docIdByPath: {} as Record<string, string>,
     locks: [] as Share[],
@@ -1370,6 +1392,7 @@ export const useStore = create<AppStore>((set, get) => ({
   noteRemovedSynced: false,
   noteRemovedByTeammate: null,
   revealRequest: null,
+  settingsRequest: null,
   revealedPath: null,
   backlinks: [],
   titles: [],
@@ -1822,6 +1845,12 @@ export const useStore = create<AppStore>((set, get) => ({
         edit: opts?.edit ?? false,
         token: (s.revealRequest?.token ?? 0) + 1,
       },
+    }));
+  },
+
+  requestSettings: (tab) => {
+    set((s) => ({
+      settingsRequest: { tab, token: (s.settingsRequest?.token ?? 0) + 1 },
     }));
   },
 
@@ -3681,6 +3710,13 @@ export const useStore = create<AppStore>((set, get) => ({
       console.info(
         `[sync] badge progress ${prev?.phase ?? "null"} → ${progress?.phase ?? "null"} ${JSON.stringify(progress ?? null).slice(0, 160)}`,
       );
+    }
+    // A FRESH arrival at `error` is a new failed run, and the only thing that
+    // may un-dismiss the sync-issues banner. Later emissions of the same phase
+    // (the reporter re-flushes while failures trickle in) must not, or a
+    // dismissed banner would pop back up as the counter moved.
+    if (prev?.phase !== "error" && progress?.phase === "error") {
+      set((s) => ({ failedRunToken: s.failedRunToken + 1 }));
     }
     return set({ syncProgress: progress });
   },

@@ -53,6 +53,63 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **"Syncing" on note open, third cause — the provider handshake.** Hocuspocus
+  reports `onUnsyncedChanges` for the sync-step/awareness messages it queues
+  while the socket comes up, and `DocSync` turned any count > 0 into
+  `pending`, which the pill renders as "Syncing…" for the length of the
+  connect. `DocSync` now ignores the count until `provider.isSynced`. The first
+  cut then re-read the count in `onSynced`, which moved the flash rather than
+  removing it: `startSync` resets the count to 1 for the sync-step it sends,
+  and the server's sync-step-2 flips `synced` while that unit is still
+  outstanding (its `SyncStatus` ack answers our step 2, sent after), so every
+  clean open reached `onSynced` with count 1 and painted "Syncing…" until the
+  ack plus the 700 ms settle — and re-stamped "Synced · just now" on the way
+  out. `DocSync` now watches the Y.Doc for local updates made during the
+  handshake (anything whose origin is not the provider) and lets `onSynced`
+  take over the indicator only for those. Four tests in `docSyncAuth.test.ts`,
+  one of them the real wire order.
+- **"Syncing" on note open, second cause.** Opening a note connects its doc;
+  the server's version capture stamps `last edited` on the first change of a
+  session and broadcasts `registry-changed`; every client then re-pulls the
+  registry, and `syncStructure` announced `phase("registering", 0)` even with
+  nothing to create — the pill showed "Syncing" for one listing round-trip. The
+  announcement is now gated on `missingFolders + missingNotes > 0`; the initial
+  `reconcile` keeps its own early "life" announcement. Server behaviour is
+  unchanged (the stamp is what makes `notes.updated_at` truthful, #104).
+- **"Syncing" flash on every note open/switch.** `ContentUploader.run()`
+  announced `phase("uploading", n)` and stamped every queued doc `queued`
+  BEFORE the per-note ingest fast-path decided whether anything had changed, so
+  a local-change run made of nothing but our own egest echo flipped the pill
+  to "Syncing 0/1" and straight back. New `lazyPhase` option (set by
+  `runLocalChangePush`): the phase is announced — sized to the notes not yet
+  settled — the first time a note needs `connect()` or fails; quiet settles
+  before that neither change the phase nor bump the previous phase's counters,
+  and still stamp `synced`. Three tests in `contentUpload.test.ts`. Each
+  local-change queue site now records a `push-queued` timeline entry naming
+  the trigger (changed on disk while closed / renamed on disk / merged an
+  outside edit), so "why did it sync?" is answerable from the Health page.
+- **Tab bar:** no hover fill on inactive tabs; `.tab-close` has equal margins
+  and no UA padding; the active card's fillets are back at `--tab-radius`
+  (14px) and start ON the border column, so the card's straight side turns
+  into the arc instead of continuing past it (the "stubs").
+- **Sidebar sync marks hidden until the server answers** (`sidebarMarksVisible`
+  in `syncRollup.ts`, consulted by `FileTree`'s index memo). An offline launch
+  drew a hollow dot on every note and a "0/N" wave on every folder: the registry
+  stamps notes `queued` as it tries to register them and, offline, nothing ever
+  resolves the stamp. With `syncStatus` in `offline` / `connecting` / `error` /
+  `no-access` the tree draws no marks; `read-only` and the per-doc terminal
+  states count as answers. The wave tracker is not reset, so counters resume
+  rather than restart when the channel returns.
+- **Run stuck at "Syncing" when the vault channel settled before the reconcile
+  returned.** Since the prime-window change (v0.1.60) the channel starts before
+  `registry.reconcile()`, so on a small vault its `ready` and the backfill's
+  idle edge both land while the reconcile is still running. `beginDownloadPhase`
+  then armed a phase whose only exit — `handleInboundIdle` — had already fired,
+  and the 30 s watchdog stood down because `vaultStatus` was `synced`. It now
+  takes the edge immediately when the channel is already synced AND the backfill
+  is settled (the `synced` guard keeps an unconnected engine, which also reports
+  settled, from ending the phase early). Regression test in
+  `docSessionEnablePhases.test.ts` fails against the staging copy.
 - **A signed-out synced vault looked exactly like a healthy one** (#145, part 1).
   The vault opened, notes rendered, edits were accepted, and the only hint was
   the corner pill — which a user missed for days while external edits and
@@ -217,6 +274,23 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   so a refused credential stops the ladder instead of being retried.
 
 ### Changed
+- **Activity as a per-day heat-map.** `vault_stats` gains `activity.days`
+  (371 calendar days = 53 week columns, oldest first, today last) cut at the caller's local
+  midnight (`todayStartMs`, new optional command arg; `None` ⇒ rolling 24 h
+  windows) because Rust has no timezone table to guess with. `format.ts
+  activityGrid` lays the series out GitHub-style — a column per week, Sunday-
+  first rows, month labels where a month's first day falls, today ringed — and
+  `HealthActivity` renders it with five accent shades and a Less/More legend.
+  The weekly strip is gone; `activity.weeks` stays in the payload.
+- **Content width defaults to full** (`prefs.ts EDITOR_MEASURE_UNSET`). A device
+  with no stored choice — and a blank or unreadable value — reads `"full"`; a
+  stored measure is untouched, and the legacy "Readable line length" switch still
+  migrates (`off` → full, anything else → 88ch). `EDITOR_MEASURE_DEFAULT` (88)
+  stays the clamp's NaN fallback and the slider's readable stop.
+- **Main window sized to the screen on launch** (`lib.rs fit_window_to_screen`,
+  before reveal so the first frame is already right): 79% × 88% of the current
+  monitor's work area in logical pixels, centered, never below the config's
+  1200×800 unless the screen is smaller, capped at 2000×1400.
 - **Pressing Private seals the vault, for the person who pressed it too.** The
   control used to express Private by DELETING the vault's grant row, and absence
   already meant something else: a vault that was never shared, which is the
@@ -444,6 +518,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **Health page: ignore, skip, take action.** `lib/health/ignore.ts` +
+  `useHealthIgnores` keep a per-vault, per-device list (`localStorage`
+  `context.healthIgnored:<vaultPath>`) of ignored check ids and dismissed issue
+  keys. `HealthChecks` drops an ignored failing check from its groups and
+  headline into an "Ignored · N" drawer with Show again; `HealthIssues` does the
+  same for rows (plus "Ignore selected" in the bulk bar) and counts only live
+  rows in its chips. Metric flags in the strip ("1 broken", "0 bytes",
+  "reclaimable") are buttons that restore-if-ignored, open and scroll to the
+  matching check (`CheckFocus`, nonce-keyed so a repeat click scrolls again).
 - **Vault Settings → Health.** One page for "what is synced, what is not, why, and
   what is in this vault". A verdict card (`local` / `signed-out` / `no-access` /
   `offline` / `connecting` / `syncing` / `attention` / `healthy`, most urgent
@@ -467,6 +550,42 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   local-change queue. Pure model in `lib/health/model.ts` (38 tests), Rust census
   in `src-tauri/src/stats.rs` (9 tests). Not a team tab: local vaults get the
   first three stages and every analytic.
+- **Health page, round two — the app points at it, and every failure explains
+  itself.** Entry points: a `SyncIssuesBanner` ("N notes didn't sync" → Open
+  Health / Dismiss, keyed on `failedRunToken` so a dismiss silences one run, not
+  the feature), the corner `SyncBadge` CTA becomes **See why** when a run ends in
+  `error` (`syncBadgeAction`), and `NotSyncingBanner` gains an Open Health
+  button; all open the dialog via a new store `requestSettings(tab)` request
+  consumed by `AccountMenu` (`SettingsTab` moved to `lib/settingsTabs.ts`).
+  Reasoning: every `HealthIssue` now carries `explanation` (meaning / what Baalda
+  does next / what you can do / where the content is), a `facts` table and
+  `autoRetries`; too-large tells a file over the cap from history over the cap
+  (joined against the census) and leads with Reset history for the latter; new
+  remedies `export-copy`, `copy-details`, `reregister`, `contact-owner`. New
+  `SyncManager.syncLog()`/`onSyncLog` (a 200-entry `SyncLog` ring buffer fed at
+  the existing status/progress/failure decision points via additive
+  `ContentUploader.onFailure` and `VaultRegistry.setFailureListener` hooks) and
+  `inspectDoc(docId)` behind a **Check a note** inspector whose verdict never
+  says "confirmed" without the durable `isPushed` checkpoint. **Fifteen
+  integrity checks** from a new Rust `vault_checks` command (`checks.rs`, one
+  shared `census_files` walk with `stats.rs`): empty / unreadable (non-UTF-8,
+  also scanning unindexed markdown) / broken-frontmatter / oversized notes,
+  stale index rows, unindexed markdown, case collisions, Windows-illegal names,
+  long paths, duplicate titles, broken links, missing embeds (resolved like the
+  app resolves them), heavy history, orphan history, and `.context/trash`; plus
+  `empty_trash` and `rebuild_index` commands. Definitions and copy live in
+  `lib/health/checks.ts`. UI split into `HealthIssues/Checks/Inspector/
+  Timeline/Stats`; the pipeline shows three cards (files on disk → connection →
+  remote vault) and reveals index/history only when they are degraded.
+- **Orphan history now means what Reclaim removes.** `vault_stats`/`vault_checks`
+  take the registry's `docId → path` map (`liveDocs`) and call a CRDT doc an
+  orphan only when NEITHER the local `notes` table nor the registry knows its
+  id — the same live set `crdtGc.ts` hands `prune_yjs_docs`. Server-pulled notes
+  carry a registry id the local table never assigned, so the page said "18
+  reclaimable" next to a Reclaim that freed nothing.
+- **Settings modal sized by the viewport** (`clamp(720px, 84vw, 1600px)` ×
+  `clamp(560px, 88vh, 1120px)`) instead of a fixed 1200×860 that read as a small
+  box on large displays.
 - **"Remember email address" on the sign-in dialog** (#120). A `Switch` under the
   password field; when on, the address used at the last SUCCESSFUL sign-in
   prefills the field next time (invitation address still outranks it). Only the

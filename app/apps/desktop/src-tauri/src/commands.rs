@@ -11,6 +11,7 @@ use crate::index::{
 };
 use crate::notefile;
 use crate::state::AppState;
+use crate::checks::{self, EmptyTrashReport, VaultChecks};
 use crate::stats::{self, VaultStats};
 use crate::tree::{self, TreeNode};
 use crate::{vault, watcher};
@@ -1867,11 +1868,85 @@ pub async fn list_attachments(
 #[tauri::command]
 pub async fn vault_stats(
     state: State<'_, AppState>,
+    live_docs: std::collections::HashMap<String, String>,
+    today_start_ms: Option<i64>,
     expected_epoch: Option<u64>,
 ) -> AppResult<VaultStats> {
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let guard = index.lock().unwrap();
-    stats::collect(&vault, &guard)
+    stats::collect(&vault, &guard, &live_docs, today_start_ms)
+}
+
+/// The integrity half of the Health page: fifteen checks over the same vault,
+/// each with a true count and up to 25 example rows. See `checks.rs` for every
+/// rule and `src/lib/health/types.ts` for the shape.
+///
+/// Epoch-pinned and `live_docs`-taking for the same reasons as `vault_stats`:
+/// the results name paths and doc ids, and `orphan-history` uses the registry
+/// map so it agrees with what the sweep would actually reclaim.
+///
+/// Heavier than `vault_stats` — it reads note contents — but bounded: nothing at
+/// or above the server's 10 MB cap is read, and embed scanning stops at 2 MB.
+#[tauri::command]
+pub async fn vault_checks(
+    state: State<'_, AppState>,
+    live_docs: std::collections::HashMap<String, String>,
+    expected_epoch: Option<u64>,
+) -> AppResult<VaultChecks> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    checks::collect(&vault, &guard, &live_docs)
+}
+
+/// Delete every recovery copy under `<vault>/.context/trash`.
+///
+/// The one destructive command that never touches a note: the files it removes
+/// are copies the app made of things already deleted, and the directory itself
+/// survives so the next delete has somewhere to go. The path is derived from the
+/// vault root alone — no caller-supplied component — and a symlinked trash
+/// directory is refused rather than followed.
+#[tauri::command]
+pub async fn empty_trash(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<EmptyTrashReport> {
+    let (vault, _) = require_vault_at(&state, expected_epoch)?;
+    checks::empty_trash(&vault)
+}
+
+/// Re-reconcile the index against the `.md` files on disk — the remedy for the
+/// `stale-index` and `unindexed-markdown` checks.
+///
+/// `Index::rebuild` is incremental and preserves every doc_id (and never touches
+/// the CRDT tables), so this is safe to run at any time; it is not a "drop and
+/// recreate". Emits `index-ready`, the same event the background rebuild at vault
+/// open emits, so titles, backlinks and the graph catch up exactly as they do
+/// then. Synchronous on purpose: the caller is a button that shows a spinner, and
+/// holding the index lock is what makes "done" mean done.
+#[tauri::command]
+pub async fn rebuild_index(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<()> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let epoch = state.inner.lock().unwrap().vault_epoch;
+    let started = std::time::Instant::now();
+    let result = {
+        let guard = index.lock().unwrap();
+        guard.rebuild(&vault)
+    };
+    let ok = result.is_ok();
+    let _ = app.emit(
+        "index-ready",
+        IndexReady {
+            path: vault.to_string_lossy().to_string(),
+            epoch,
+            ok,
+            ms: started.elapsed().as_millis() as u64,
+        },
+    );
+    result
 }
 
 /// Read an arbitrary host file the user just dropped/picked (absolute path).

@@ -4,6 +4,7 @@ import { AccountMenu } from "./components/AccountMenu";
 import { AsyncButton } from "./components/AsyncButton";
 import { Banner } from "./components/Banner";
 import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
+import { SyncIssuesBannerView, syncIssuesBanner } from "./components/SyncIssuesBanner";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
@@ -174,6 +175,38 @@ function NotSyncingBanner() {
     <NotSyncingBannerView
       reason={reason}
       onSignIn={() => useStore.getState().setAuthPrompt("sign-in")}
+      onOpenHealth={() => useStore.getState().requestSettings("health")}
+    />
+  );
+}
+
+/**
+ * The strip that says a finished sync run left notes behind, and points at the
+ * page that can explain each one.
+ *
+ * Wired here, alongside the other banners, so `SyncIssuesBannerView` stays a
+ * pure component and its one decision (`syncIssuesBanner`) stays unit-testable.
+ * The dismissal is local state on purpose: it is a view preference about ONE
+ * run, nothing else reads it, and keying it on the store's `failedRunToken`
+ * means the next failing run raises the banner again by itself.
+ */
+function SyncIssuesBanner() {
+  const syncEnabled = useStore((s) => s.syncEnabled);
+  const progress = useStore((s) => s.syncProgress);
+  const runToken = useStore((s) => s.failedRunToken);
+  const [dismissedRunToken, setDismissedRunToken] = useState<number | null>(null);
+  const { show, failed } = syncIssuesBanner({
+    syncEnabled,
+    progress,
+    runToken,
+    dismissedRunToken,
+  });
+  return (
+    <SyncIssuesBannerView
+      show={show}
+      failed={failed}
+      onOpenHealth={() => useStore.getState().requestSettings("health")}
+      onDismiss={() => setDismissedRunToken(runToken)}
     />
   );
 }
@@ -611,6 +644,11 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
       // "N not synced" carries its own remedy: one click re-pulls the registry
       // and re-runs the content pass for everything still unconfirmed.
       onRetry={syncEnabled ? () => void syncManager.retrySync() : undefined}
+      // …and when a run has actually failed, the first click should EXPLAIN
+      // rather than retry: a note the server refused for its size only re-fails.
+      onOpenHealth={
+        syncEnabled ? () => useStore.getState().requestSettings("health") : undefined
+      }
     />
   );
 }
@@ -1165,6 +1203,7 @@ export default function App() {
             </button>
           </header>
           <NotSyncingBanner />
+          <SyncIssuesBanner />
           <RemovedBanner />
           <DeletedByTeammateBanner />
           <div className="editor-wrap">
