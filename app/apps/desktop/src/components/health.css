@@ -916,8 +916,20 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* An open row is framed in its own tone so the panel reads as one card, not as
+   loose paragraphs under a list row. */
+.health-check[data-open] {
+  margin: var(--sp-2) calc(-1 * var(--sp-3));
+  padding: 0 var(--sp-3);
+  border-radius: var(--radius-lg);
+  background: var(--tone-soft);
+  border-bottom: 0;
+}
+.health-check[data-open] .health-check-head {
+  border-bottom: 1px solid color-mix(in srgb, var(--tone) 22%, transparent);
+}
 .health-check-panel {
-  padding: 0 0 var(--sp-4) calc(16px + var(--sp-3));
+  padding: var(--sp-3) 0 var(--sp-4) calc(20px + var(--sp-3));
   animation: health-open var(--t-med) var(--ease);
 }
 .health-check-why {
@@ -933,20 +945,31 @@
   list-style: none;
   border-top: 1px solid var(--border);
 }
+.health-check-items {
+  border-top-color: color-mix(in srgb, var(--tone) 22%, transparent);
+}
 .health-check-items li {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  padding: var(--sp-1) 0;
-  border-bottom: 1px solid var(--border);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--tone) 14%, transparent);
+}
+.health-check-items li:last-child {
+  border-bottom: 0;
 }
 .health-check-items .health-path {
-  flex: 1 1 auto;
+  flex: 1 1 40%;
+  min-width: 0;
 }
 .health-check-detail {
-  flex: 0 0 auto;
+  flex: 0 1 38%;
+  min-width: 0;
   font-size: var(--fs-xs);
   color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .health-check-item-actions {
   flex: 0 0 auto;

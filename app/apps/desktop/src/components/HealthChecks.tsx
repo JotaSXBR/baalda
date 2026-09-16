@@ -129,9 +129,9 @@ type CheckState = "passed" | "failed" | "unknown";
 function tone(def: CheckRow["def"], state: CheckState): "good" | "warn" | "bad" | "muted" {
   if (state === "unknown") return "muted";
   if (state === "passed") return "good";
-  if (def.severity === "error") return "bad";
-  if (def.severity === "warn") return "warn";
-  return "muted";
+  // Anything that fails is amber unless it is an error; a grey dot on a failing
+  // row read as "nothing to see here", which is the opposite of a finding.
+  return def.severity === "error" ? "bad" : "warn";
 }
 
 function CheckItem({
@@ -159,6 +159,7 @@ function CheckItem({
       data-tone={tone(def, state)}
       data-state={state}
       data-passed={state === "passed" ? "" : undefined}
+      data-open={failed && open ? "" : undefined}
     >
       <div className="health-check-head">
         <button
@@ -183,9 +184,13 @@ function CheckItem({
                   <span className="health-check-bytes">{formatBytes(result.bytes)}</span>
                 )}
               </span>
-              <span className="health-check-why-line">
-                {firstSentence(def.whyItMatters)}
-              </span>
+              {/* The panel opens with the full paragraph, so the one-line
+                  brief steps aside instead of repeating its first sentence. */}
+              {!open && (
+                <span className="health-check-why-line">
+                  {firstSentence(def.whyItMatters)}
+                </span>
+              )}
               <span className="health-chevron" data-open={open ? "" : undefined} aria-hidden="true">
                 <Glyph name="chevron" />
               </span>
@@ -257,9 +262,6 @@ function CheckBadge({ def, state }: { def: CheckRow["def"]; state: CheckState })
   if (state === "unknown") {
     return <span className="health-check-dot" data-hollow="" aria-label="Not run" />;
   }
-  if (def.severity === "info") {
-    return <span className="health-check-dot" aria-label="Housekeeping" />;
-  }
   return (
     <span
       className="health-check-badge"
@@ -328,13 +330,13 @@ function ItemAction({
   switch (action) {
     case "open":
       return (
-        <button type="button" className="link-btn" onClick={() => openNote(item.path)}>
+        <button type="button" className="ghost-pill sm" onClick={() => openNote(item.path)}>
           Open
         </button>
       );
     case "reveal":
       return (
-        <AsyncButton className="link-btn" onClick={() => actions.reveal(item.path)}>
+        <AsyncButton className="ghost-pill sm" onClick={() => actions.reveal(item.path)}>
           Reveal
         </AsyncButton>
       );
@@ -342,7 +344,7 @@ function ItemAction({
       return (
         <button
           type="button"
-          className="link-btn danger"
+          className="ghost-pill sm danger"
           onClick={() => confirm({ kind: "delete", path: item.path })}
         >
           Delete
@@ -360,7 +362,7 @@ function ItemAction({
       return item.docId ? (
         <button
           type="button"
-          className="link-btn danger"
+          className="ghost-pill sm danger"
           onClick={() =>
             confirm({ kind: "reset", docId: item.docId as string, path: item.path })
           }
