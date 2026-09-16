@@ -204,7 +204,7 @@ describe("HealthView", () => {
 
   it("offers a reclaim button while orphan history exists", () => {
     const html = render(snapshot());
-    expect(html).toContain("2 orphan");
+    expect(html).toContain("reclaimable");
     expect(html).toContain("Reclaim");
   });
 

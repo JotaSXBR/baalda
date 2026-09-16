@@ -132,6 +132,11 @@ export function HealthView({
     <div className="health-tab">
       <VerdictCard snapshot={snapshot} onRefresh={refresh} loading={loading} />
 
+      {/* The vault's numbers sit right under the verdict as one quiet strip:
+          they frame everything below ("15 notes, 259 KB") without competing
+          with it. */}
+      <HealthStats stats={stats} loading={loading} statsError={statsError} handlers={handlers} />
+
       <Pipeline stages={report.stages} />
 
       <Section title="Sync">
@@ -179,18 +184,6 @@ export function HealthView({
           loading={loading}
           handlers={handlers}
           onRefresh={refresh}
-        />
-      </Section>
-
-      <Section
-        title="Vault at a glance"
-        description="One pass over the folder and the local index, taken just now."
-      >
-        <HealthStats
-          stats={stats}
-          loading={loading}
-          statsError={statsError}
-          handlers={handlers}
         />
       </Section>
 

@@ -1172,6 +1172,82 @@
 
 /* ── Vault at a glance ────────────────────────────────────────────────────── */
 
+/* ── Metrics strip ─────────────────────────────────────────────────────── */
+.health-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: 0;
+  margin: var(--sp-4) 0 0;
+  padding: var(--sp-2) 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+.health-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-4);
+  border-left: 1px solid var(--border);
+}
+.health-metric:first-child {
+  border-left: 0;
+}
+.health-metric-value {
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.health-metric-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.health-metric-flag {
+  font-size: var(--fs-xs);
+  color: var(--warning);
+  white-space: nowrap;
+}
+.health-metric-action {
+  align-self: flex-start;
+  font-size: var(--fs-xs);
+  padding: 0;
+}
+.health-metric.is-skeleton .health-metric-value,
+.health-metric.is-skeleton .health-metric-label {
+  display: block;
+  height: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-active);
+}
+.health-metric.is-skeleton .health-metric-value {
+  width: 48px;
+  height: 16px;
+}
+.health-metric.is-skeleton .health-metric-label {
+  width: 64px;
+}
+@container health (max-width: 720px) {
+  .health-metrics {
+    grid-template-columns: repeat(3, 1fr);
+    row-gap: var(--sp-2);
+  }
+  .health-metric:nth-child(3n + 1) {
+    border-left: 0;
+  }
+}
+
 .health-tile-group + .health-tile-group {
   margin-top: var(--sp-4);
 }

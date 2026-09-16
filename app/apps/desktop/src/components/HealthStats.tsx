@@ -1,5 +1,5 @@
 /* Vault Settings → Health — the census: what is actually in this vault.
-   Three groups of cards, a twelve-week activity strip and one "largest" table
+   A compact metrics strip, a twelve-week activity strip and one "largest" table
    behind a segmented control. Everything here comes from the Rust census in
    `VaultStats`; nothing is derived from the sync layer, so this whole block is
    just as true for a vault that has never had a server. */
@@ -8,23 +8,31 @@ import type { HistoryFootprint, SizedFile, VaultStats } from "../lib/health/type
 import { activityLevel, formatBytes, relativeTime } from "../lib/health/format";
 import { MAX_NOTE_BYTES } from "../lib/sync/contentUpload";
 import { AsyncButton } from "./AsyncButton";
-import { Eyebrow, Glyph, PathText, type GlyphName, type HealthHandlers } from "./HealthShared";
+import { Glyph, PathText, type GlyphName, type HealthHandlers } from "./HealthShared";
 
 /** Amber before the hard ceiling: a note this size is one paste from being
  *  refused, and the warning is only useful while it can still be acted on. */
 const NOTE_WARN_BYTES = 8 * 1024 * 1024;
 
-// ── Vault at a glance ─────────────────────────────────────────────────────────
+// ── Metrics strip ─────────────────────────────────────────────────────────────
 
-interface Tile {
+interface Metric {
   icon: GlyphName;
   label: string;
   value: string;
+  /** Tooltip detail; kept off the strip so it stays one quiet row. */
   sub?: string;
-  tone?: "good" | "warn" | "bad" | "busy" | "muted";
+  /** Short inline note when something is off ("1 broken"), amber. */
+  flag?: string;
   action?: "reclaim";
 }
 
+/**
+ * The census as one compact strip under the verdict card: ten numbers, each a
+ * value over a tiny label, with the detail on hover. It used to be three groups
+ * of tall cards further down the page, which pushed everything a person came
+ * for (what failed, and why) below the fold behind numbers that rarely change.
+ */
 export function HealthStats({
   stats,
   loading,
@@ -40,11 +48,11 @@ export function HealthStats({
     return (
       <>
         {statsError && <div className="auth-error">{statsError}</div>}
-        <ul className="health-tiles" aria-busy={loading || undefined}>
-          {Array.from({ length: 8 }, (_, i) => (
-            <li key={i} className="health-tile is-skeleton" aria-hidden="true">
-              <span className="health-tile-value" />
-              <span className="health-tile-label" />
+        <ul className="health-metrics" aria-busy={loading || undefined}>
+          {Array.from({ length: 10 }, (_, i) => (
+            <li key={i} className="health-metric is-skeleton" aria-hidden="true">
+              <span className="health-metric-value" />
+              <span className="health-metric-label" />
             </li>
           ))}
         </ul>
@@ -58,129 +66,84 @@ export function HealthStats({
   const orphans = stats.history.orphanDocs;
   const totalBytes = stats.notes.bytes + stats.attachments.bytes + stats.otherFiles.bytes;
 
-  const groups: Array<{ title: string; tiles: Tile[] }> = [
+  const metrics: Metric[] = [
+    { icon: "note", label: "Notes", value: stats.notes.count.toLocaleString(), sub: formatBytes(stats.notes.bytes) },
+    { icon: "folder", label: "Folders", value: stats.folders.toLocaleString() },
     {
-      title: "Content",
-      tiles: [
-        {
-          icon: "note",
-          label: "Notes",
-          value: stats.notes.count.toLocaleString(),
-          sub: formatBytes(stats.notes.bytes),
-          tone: "busy",
-        },
-        {
-          icon: "folder",
-          label: "Folders",
-          value: stats.folders.toLocaleString(),
-          sub: stats.folders === 0 ? "everything at the top level" : "in this vault",
-          tone: "busy",
-        },
-        {
-          icon: "paperclip",
-          label: "Attachments",
-          value: stats.attachments.count.toLocaleString(),
-          sub: formatBytes(stats.attachments.bytes),
-          tone: "busy",
-        },
-        {
-          icon: "file",
-          label: "Other files",
-          value: stats.otherFiles.count.toLocaleString(),
-          sub: formatBytes(stats.otherFiles.bytes),
-          tone: "muted",
-        },
-      ],
+      icon: "paperclip",
+      label: "Attachments",
+      value: stats.attachments.count.toLocaleString(),
+      sub: formatBytes(stats.attachments.bytes),
     },
     {
-      title: "Structure",
-      tiles: [
-        {
-          icon: "tag",
-          label: "Tags",
-          value: stats.tags.toLocaleString(),
-          sub: "distinct across the vault",
-          tone: "good",
-        },
-        {
-          icon: "link",
-          label: "Links",
-          value: stats.links.toLocaleString(),
-          sub:
-            stats.brokenLinks > 0
-              ? `${stats.brokenLinks.toLocaleString()} broken`
-              : "none broken",
-          tone: stats.brokenLinks > 0 ? "warn" : "good",
-        },
-        {
-          icon: "empty",
-          label: "Empty notes",
-          value: stats.notes.empty.toLocaleString(),
-          sub: stats.notes.empty > 0 ? "0 bytes on disk" : "every note has text",
-          tone: stats.notes.empty > 0 ? "warn" : "good",
-        },
-      ],
+      icon: "file",
+      label: "Other files",
+      value: stats.otherFiles.count.toLocaleString(),
+      sub: formatBytes(stats.otherFiles.bytes),
+    },
+    { icon: "tag", label: "Tags", value: stats.tags.toLocaleString() },
+    {
+      icon: "link",
+      label: "Links",
+      value: stats.links.toLocaleString(),
+      flag: stats.brokenLinks > 0 ? `${stats.brokenLinks.toLocaleString()} broken` : undefined,
     },
     {
-      title: "Storage",
-      tiles: [
-        {
-          icon: "disk",
-          label: "Total size",
-          value: formatBytes(totalBytes),
-          sub: "notes, attachments and other files",
-          tone: "muted",
-        },
-        {
-          icon: "database",
-          label: "Search index",
-          value: formatBytes(stats.index.bytes),
-          sub: `${stats.notes.count.toLocaleString()} notes indexed`,
-          tone: "muted",
-        },
-        {
-          icon: "history",
-          label: "Edit history",
-          value: formatBytes(stats.history.bytes),
-          sub:
-            orphans > 0
-              ? `${orphans.toLocaleString()} orphan · ${formatBytes(stats.history.orphanBytes)} reclaimable`
-              : `${stats.history.docs.toLocaleString()} notes · ${stats.history.updates.toLocaleString()} updates`,
-          tone: orphans > 0 ? "warn" : "muted",
-          action: orphans > 0 ? "reclaim" : undefined,
-        },
-      ],
+      icon: "empty",
+      label: "Empty notes",
+      value: stats.notes.empty.toLocaleString(),
+      flag: stats.notes.empty > 0 ? "0 bytes" : undefined,
+    },
+    {
+      icon: "disk",
+      label: "Total size",
+      value: formatBytes(totalBytes),
+      sub: "Notes, attachments and other files",
+    },
+    {
+      icon: "database",
+      label: "Index",
+      value: formatBytes(stats.index.bytes),
+      sub: `${stats.notes.count.toLocaleString()} notes indexed`,
+    },
+    {
+      icon: "history",
+      label: "History",
+      value: formatBytes(stats.history.bytes),
+      sub: `${stats.history.docs.toLocaleString()} notes · ${stats.history.updates.toLocaleString()} updates`,
+      flag:
+        orphans > 0
+          ? `${formatBytes(stats.history.orphanBytes)} reclaimable`
+          : undefined,
+      action: orphans > 0 ? "reclaim" : undefined,
     },
   ];
 
   return (
     <>
       {statsError && <div className="auth-error">{statsError}</div>}
-      {groups.map((g) => (
-        <div className="health-tile-group" key={g.title}>
-          <Eyebrow>{g.title}</Eyebrow>
-          <ul className="health-tiles">
-            {g.tiles.map((t) => (
-              <li className="health-tile" data-tone={t.tone ?? "muted"} key={t.label}>
-                <span className="health-tile-icon" aria-hidden="true">
-                  <Glyph name={t.icon} />
-                </span>
-                <span className="health-tile-value">{t.value}</span>
-                <span className="health-tile-label">{t.label}</span>
-                {t.sub && <span className="health-tile-sub">{t.sub}</span>}
-                {t.action === "reclaim" && (
-                  <AsyncButton
-                    className="ghost-pill sm health-tile-action"
-                    onClick={handlers.reclaim}
-                  >
-                    Reclaim
-                  </AsyncButton>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ))}
+      <ul className="health-metrics" aria-label="Vault at a glance">
+        {metrics.map((m) => (
+          <li
+            className="health-metric"
+            data-flag={m.flag ? "" : undefined}
+            key={m.label}
+            title={m.sub ? `${m.label}: ${m.sub}` : undefined}
+          >
+            <span className="health-metric-value">{m.value}</span>
+            <span className="health-metric-label">
+              <Glyph name={m.icon} size={12} />
+              {m.label}
+            </span>
+            {m.flag && <span className="health-metric-flag">{m.flag}</span>}
+            {m.action === "reclaim" && (
+              <AsyncButton className="link-btn health-metric-action" onClick={handlers.reclaim}>
+                Reclaim
+              </AsyncButton>
+            )}
+          </li>
+        ))}
+      </ul>
     </>
   );
 }
