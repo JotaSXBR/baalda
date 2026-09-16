@@ -135,7 +135,18 @@ pub struct VaultStats {
 
 /// Take the census. `index` must be the index of `vault` — the caller holds the
 /// index mutex for the duration, so this does no locking of its own.
-pub fn collect(vault: &Path, index: &Index) -> AppResult<VaultStats> {
+/// `live_docs` is the registry's doc-id map (`docId → relPath`) for the open
+/// vault. A note pulled down from the server can carry a registry doc id that
+/// differs from its local `notes.id`, so its history is keyed by an id the
+/// `notes` table has never heard of. Counting that as an orphan reported "18
+/// notes reclaimable" while the sweep — which unions the SAME registry ids into
+/// its live set (`crdtGc.ts`) — correctly removed nothing. Orphan here must mean
+/// exactly what `prune_yjs_docs` would remove, so the two agree by construction.
+pub fn collect(
+    vault: &Path,
+    index: &Index,
+    live_docs: &HashMap<String, String>,
+) -> AppResult<VaultStats> {
     let computed_at = now_ms();
 
     // What the index calls a note. This is the ONLY classifier: a `.md` file the
@@ -221,7 +232,10 @@ pub fn collect(vault: &Path, index: &Index) -> AppResult<VaultStats> {
     let mut history = HistoryStats::default();
     let mut footprints: Vec<HistoryFootprint> = Vec::new();
     for doc in index.history_footprints()? {
-        let path = path_by_id.get(&doc.doc_id).cloned();
+        let path = path_by_id
+            .get(&doc.doc_id)
+            .or_else(|| live_docs.get(&doc.doc_id))
+            .cloned();
         history.docs += 1;
         history.updates += doc.updates;
         history.bytes += doc.bytes;
@@ -385,7 +399,7 @@ mod tests {
     #[test]
     fn counts_notes_folders_attachments_and_other_files() {
         let (tmp, index) = fixture();
-        let stats = collect(tmp.path(), &index).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
 
         assert_eq!(stats.notes.count, 3, "Alpha, Empty, sub/Beta");
         assert_eq!(stats.notes.empty, 1, "Empty.md is 0 bytes");
@@ -408,12 +422,36 @@ mod tests {
     #[test]
     fn index_aggregates_follow_the_sqlite_tables() {
         let (tmp, index) = fixture();
-        let stats = collect(tmp.path(), &index).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
 
         assert_eq!(stats.tags, 1, "#work");
         assert_eq!(stats.links, 1, "[[Beta]] resolves");
         assert_eq!(stats.broken_links, 1, "[[Ghost]] does not");
         assert!(stats.index.bytes > 0, "index.sqlite exists on disk");
+    }
+
+    #[test]
+    fn a_registry_live_doc_is_not_an_orphan_and_borrows_its_path() {
+        // A note pulled from the server keeps a registry doc id the local `notes`
+        // table never assigned. Its history must count as live — the sweep's live
+        // set includes registry ids — or the page claims space Reclaim cannot free.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.md"), b"# a").unwrap();
+        let index = Index::open(tmp.path()).unwrap();
+        index.rebuild(tmp.path()).unwrap();
+        index.append_yjs_update("registry-id", &[0u8; 64]).unwrap();
+        index.append_yjs_update("truly-orphan", &[0u8; 32]).unwrap();
+        let mut live = HashMap::new();
+        live.insert("registry-id".to_string(), "a.md".to_string());
+        let stats = collect(tmp.path(), &index, &live).unwrap();
+        assert_eq!(stats.history.orphan_docs, 1);
+        assert_eq!(stats.history.orphan_bytes, 32);
+        let reg = stats
+            .heaviest_history
+            .iter()
+            .find(|h| h.doc_id == "registry-id")
+            .unwrap();
+        assert_eq!(reg.path.as_deref(), Some("a.md"));
     }
 
     #[test]
@@ -428,7 +466,7 @@ mod tests {
         // A doc the notes table has never heard of — deleted, rebound or forked.
         index.append_yjs_update("orphan-doc", &[0u8; 128]).unwrap();
 
-        let stats = collect(tmp.path(), &index).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
         assert_eq!(stats.history.docs, 3);
         assert_eq!(stats.history.updates, 4);
         assert_eq!(stats.history.bytes, 64 + 32 + 8 + 128);
@@ -457,7 +495,7 @@ mod tests {
             .save_yjs_state_vectors(&[("sv-only".to_string(), vec![0u8; 16])])
             .unwrap();
 
-        let stats = collect(tmp.path(), &index).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
         assert_eq!(stats.history.docs, 1, "the state-vector-only doc is skipped");
         let alpha_row = stats
             .heaviest_history
@@ -484,7 +522,7 @@ mod tests {
         }
         let index = Index::open(root).unwrap();
         index.rebuild(root).unwrap();
-        let stats = collect(root, &index).unwrap();
+        let stats = collect(root, &index, &HashMap::new()).unwrap();
 
         assert_eq!(stats.largest_notes.len(), TOP_N);
         assert_eq!(stats.largest_notes[0].path, "n14.md");
@@ -541,7 +579,7 @@ mod tests {
         let (tmp, index) = fixture();
         let alpha = doc_id_of(&index, "Alpha.md");
         index.append_yjs_update(&alpha, &[0u8; 8]).unwrap();
-        let json = serde_json::to_value(collect(tmp.path(), &index).unwrap()).unwrap();
+        let json = serde_json::to_value(collect(tmp.path(), &index, &HashMap::new()).unwrap()).unwrap();
 
         for key in [
             "computedAt",
@@ -591,7 +629,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let index = Index::open(tmp.path()).unwrap();
         index.rebuild(tmp.path()).unwrap();
-        let stats = collect(tmp.path(), &index).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
 
         assert_eq!(stats.notes.count, 0);
         assert_eq!(stats.folders, 0);
@@ -606,7 +644,7 @@ mod tests {
     #[test]
     fn the_context_dir_is_never_counted() {
         let (tmp, index) = fixture();
-        let stats = collect(tmp.path(), &index).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
         let every_path: Vec<&str> = stats
             .largest_notes
             .iter()

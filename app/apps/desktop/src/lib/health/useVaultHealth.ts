@@ -68,8 +68,15 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     }
     let live = true;
     setLoading(true);
+    // The registry's ids are the second live id space (see `crdtGc.ts`): without
+    // them a server-pulled note's history reads as an orphan the sweep then
+    // refuses to remove — "18 reclaimable" beside a Reclaim that frees nothing.
+    const liveDocs: Record<string, string> = {};
+    for (const [path, docId] of Object.entries(useStore.getState().docIdByPath)) {
+      liveDocs[docId] = path;
+    }
     void ipc
-      .vaultStats(vaultEpoch)
+      .vaultStats(liveDocs, vaultEpoch)
       .then((s) => {
         if (!live) return;
         setStats(s);
@@ -86,7 +93,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     return () => {
       live = false;
     };
-  }, [vaultPath, vaultEpoch, nonce]);
+  }, [vaultPath, vaultEpoch, nonce, docIdByPath]);
 
   const refresh = useCallback(() => setNonce((n) => n + 1), []);
 

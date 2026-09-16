@@ -560,9 +560,14 @@ export const listAttachments = (expectedEpoch?: VaultEpoch) =>
  *
  * A file counts as a *note* exactly when the index has a `notes` row for its
  * path; `mtime` values are milliseconds since the epoch.
+ *
+ * `liveDocs` is the registry's `docId → relPath` map. A history doc is an
+ * ORPHAN only when neither the local `notes` table nor this map knows its id —
+ * the same live set `pruneYjsDocs` is given — so "N reclaimable" and what
+ * Reclaim actually removes can never disagree.
  */
-export const vaultStats = (expectedEpoch?: VaultEpoch) =>
-  invoke<VaultStats>("vault_stats", { expectedEpoch: expectedEpoch ?? null });
+export const vaultStats = (liveDocs: Record<string, string>, expectedEpoch?: VaultEpoch) =>
+  invoke<VaultStats>("vault_stats", { liveDocs, expectedEpoch: expectedEpoch ?? null });
 
 /** Read a dropped/picked host file by absolute path (not vault-scoped). */
 export const readExternalFile = (path: string) =>

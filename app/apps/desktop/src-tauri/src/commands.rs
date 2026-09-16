@@ -1867,11 +1867,12 @@ pub async fn list_attachments(
 #[tauri::command]
 pub async fn vault_stats(
     state: State<'_, AppState>,
+    live_docs: std::collections::HashMap<String, String>,
     expected_epoch: Option<u64>,
 ) -> AppResult<VaultStats> {
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let guard = index.lock().unwrap();
-    stats::collect(&vault, &guard)
+    stats::collect(&vault, &guard, &live_docs)
 }
 
 /// Read an arbitrary host file the user just dropped/picked (absolute path).
