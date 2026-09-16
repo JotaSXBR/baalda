@@ -86,6 +86,70 @@ export interface VaultStats {
   };
 }
 
+// ── Vault checks (Rust) ────────────────────────────────────────────────────────
+
+/**
+ * Stable ids of the integrity checks Rust runs. The UI owns the labels,
+ * descriptions and severities (`lib/health/checks.ts`); Rust only reports
+ * counts and the affected files, so adding a check is one Rust arm + one row.
+ */
+export type VaultCheckId =
+  /** Notes whose file is 0 bytes. */
+  | "empty-notes"
+  /** Notes that are not valid UTF-8 text (cannot be edited or synced). */
+  | "unreadable-notes"
+  /** A leading `---` frontmatter block that does not close or is not YAML-ish. */
+  | "bad-frontmatter"
+  /** Two or more paths equal ignoring case (one file on macOS/Windows, two on the server). */
+  | "case-collisions"
+  /** Names Windows refuses: `<>:"|?*`, control chars, trailing dot/space, CON/PRN/AUX/NUL/COM1-9/LPT1-9. */
+  | "illegal-names"
+  /** Vault-relative path longer than 200 characters. */
+  | "long-paths"
+  /** Index row whose stored mtime/sha256 no longer matches the file on disk. */
+  | "stale-index"
+  /** Wikilinks that resolve to no note (`links.dst_note_id IS NULL`), by source note. */
+  | "broken-links"
+  /** `![[file]]` / `![](path)` embeds whose target is not in the vault. */
+  | "missing-embeds"
+  /** Two or more notes sharing one derived title (ambiguous wikilinks). */
+  | "duplicate-titles"
+  /** `.md`/`.markdown` files on disk with no `notes` row (never indexed). */
+  | "unindexed-markdown"
+  /** Notes at or above the server cap (10 MB); items carry `bytes`. */
+  | "oversized-notes"
+  /** Docs whose CRDT history is over 20× the file or over 256 updates uncompacted. */
+  | "heavy-history"
+  /** CRDT docs no live id claims (same rule as `VaultStats.history.orphanDocs`). */
+  | "orphan-history"
+  /** Recovery copies under `.context/trash` (count = files, bytes = total). */
+  | "trash";
+
+export interface VaultCheckItem {
+  /** Vault-relative path; for `trash` the path under `.context/trash`. */
+  path: string;
+  docId?: string | null;
+  /** One short fact: the colliding sibling, the bad character, the missing target… */
+  detail?: string | null;
+  bytes?: number | null;
+}
+
+export interface VaultCheckResult {
+  id: VaultCheckId;
+  /** True total, even when `items` is capped. */
+  count: number;
+  /** Total bytes when the check is about size (oversized, heavy history, orphans, trash). */
+  bytes?: number | null;
+  /** At most 25, most significant first (largest bytes, else path order). */
+  items: VaultCheckItem[];
+}
+
+export interface VaultChecks {
+  computedAt: number;
+  /** One entry per `VaultCheckId`, always all of them, in the union's order. */
+  results: VaultCheckResult[];
+}
+
 // ── Sync health (TS model) ─────────────────────────────────────────────────────
 
 /**
@@ -151,7 +215,39 @@ export type HealthRemedy =
   | "upgrade"
   | "reset-history"
   | "reclaim"
-  | "sign-in";
+  | "sign-in"
+  /** Save a copy of the file outside the vault (native save dialog). */
+  | "export-copy"
+  /** Put this issue's facts + explanation on the clipboard as text. */
+  | "copy-details"
+  /** Register this path with the server again as a note (left-behind files). */
+  | "reregister"
+  /** Show who owns the vault and copy a ready-to-send access request. */
+  | "contact-owner";
+
+/**
+ * The reasoning behind an issue, in the user's terms. This is the point of the
+ * page: a failed note must explain itself here, not in a console.
+ */
+export interface HealthExplanation {
+  /** What this means: one or two sentences, no jargon. */
+  meaning: string;
+  /** What Baalda will do on its own, e.g. "Retries on the next connect" or
+   *  "Nothing — it will not retry until the note is smaller". */
+  next: string;
+  /** What the user can do, ordered best-first. Prose, one item per line. */
+  fixes: string[];
+  /** Where copies of this note's content exist RIGHT NOW. */
+  safety: "only-here" | "on-server" | "both" | "unknown";
+}
+
+/** One row of the issue's fact table: Path, Doc id, Size, Cap, Error code, … */
+export interface HealthFact {
+  label: string;
+  value: string;
+  /** Show a copy button (ids, raw reasons). */
+  copyable?: boolean;
+}
 
 export interface HealthIssue {
   /** Stable key for React and for de-duplication: the docId when known, else the path. */
@@ -168,6 +264,11 @@ export interface HealthIssue {
   remedies: HealthRemedy[];
   /** Server error code when one was carried. */
   code: string | null;
+  explanation: HealthExplanation;
+  facts: HealthFact[];
+  /** True when the sync layer will try again by itself (next connect / drain);
+   *  false when only a user action can move it. */
+  autoRetries: boolean;
 }
 
 /** The vault's per-note tally — the same numbers the sidebar dots roll up. */
@@ -199,6 +300,59 @@ export interface HealthReport {
   serverHost: string | null;
 }
 
+// ── Sync timeline ──────────────────────────────────────────────────────────────
+
+export type SyncLogLevel = "info" | "warn" | "error";
+
+/**
+ * One line of the vault's recent sync history, kept in a ring buffer by the
+ * sync manager (newest last). `event` is a short stable kind for filtering
+ * ("connect", "run-start", "run-done", "push-failed", "retry", "revoked", …);
+ * `message` is the sentence shown.
+ */
+export interface SyncLogEntry {
+  at: number;
+  level: SyncLogLevel;
+  event: string;
+  message: string;
+  docId?: string | null;
+  path?: string | null;
+}
+
+// ── Per-note inspector ────────────────────────────────────────────────────────
+
+/**
+ * Everything the app knows about ONE note's sync position, for the page's
+ * "Check a note" box. Every field is a fact the sync layer already holds;
+ * nothing here is inferred.
+ */
+export interface NoteInspection {
+  path: string;
+  /** False when no such file is on disk (the path was typed or is stale). */
+  exists: boolean;
+  docId: string | null;
+  /** Reported per-doc state this session, or null when nothing was reported. */
+  state: "unsynced" | "queued" | "syncing" | "synced" | "error" | null;
+  /** The registry's durable "server has this content" checkpoint. */
+  pushed: boolean;
+  /** Sitting in the local-change queue (will be pushed on the next drain). */
+  queued: boolean;
+  /** Holds local ops the server may not have (forces a real connect). */
+  diverged: boolean;
+  /** Remembered permanent failure reason, or null. */
+  permanentFailure: string | null;
+  /** Settled as "empty here and on the server" — nothing to push. */
+  emptyEverywhere: boolean;
+  bytes: number | null;
+  mtime: number | null;
+  /** Local CRDT footprint (encoded state), or null when unavailable. */
+  historyBytes: number | null;
+  /** One honest sentence, e.g. "Synced — the server confirmed this note's content." */
+  verdict: string;
+  /** The matching issue when this note is in the Needs-attention list. */
+  issue: HealthIssue | null;
+}
+
 // ── Actions the page can take ──────────────────────────────────────────────────
 
 export interface HealthActions {
@@ -219,6 +373,22 @@ export interface HealthActions {
   requestSignIn(): void;
   /** Build the plain-text diagnostic bundle and copy it; returns the text. */
   copyDiagnostics(): Promise<string>;
+  /** Native save dialog, then copy the file out of the vault. Resolves to the
+   *  destination, or null when cancelled. */
+  exportCopy(path: string): Promise<string | null>;
+  /** Copy one issue's title, why, facts and explanation as text; returns it. */
+  copyIssue(issue: HealthIssue): Promise<string>;
+  /** Register a left-behind path with the server again and queue its content. */
+  reregister(path: string): Promise<void>;
+  /** Who owns this vault, plus a ready-to-send access request copied to the
+   *  clipboard. Null owner when unknown. */
+  contactOwner(): Promise<{ owner: { name: string; email: string } | null; message: string }>;
+  /** Everything known about one note's sync position. */
+  inspectNote(path: string): Promise<NoteInspection>;
+  /** Delete every recovery copy under `.context/trash`; returns bytes freed. */
+  emptyTrash(): Promise<{ filesRemoved: number; bytesFreed: number }>;
+  /** Drop and rebuild the local search index from the files (fixes stale rows). */
+  rebuildIndex(): Promise<void>;
 }
 
 /** What `useVaultHealth()` hands the tab. */
@@ -226,8 +396,12 @@ export interface VaultHealthSnapshot {
   report: HealthReport;
   stats: VaultStats | null;
   statsError: string | null;
+  /** The integrity checks; null until the first pass lands or when it failed. */
+  checks: VaultChecks | null;
   /** True while the first census is in flight. */
   loading: boolean;
+  /** Recent sync events, oldest first (ring buffer, ≤ 200). */
+  log: SyncLogEntry[];
   refresh(): void;
   actions: HealthActions;
 }

@@ -3468,8 +3468,12 @@ body:has(.sidebar-resizer.dragging) {
    the card. Opacity only. */
 .settings-page.settings-modal {
   position: relative;
-  width: min(1200px, 94vw);
-  height: min(860px, 90vh);
+  /* Sized by the viewport, not a fixed cap: at 1200×860 the card filled a
+     laptop but sat as a small box in the middle of a 27" display while the
+     same tabs had room to breathe. It now takes a steady share of the window
+     up to a ceiling that keeps line lengths readable on the widest screens. */
+  width: clamp(720px, 84vw, 1600px);
+  height: clamp(560px, 88vh, 1120px);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
