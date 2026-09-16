@@ -1,44 +1,54 @@
-- Baalda now connects to your vault almost as soon as it opens. The connection used to wait for the whole vault to be checked over first; now it starts straight away and the two happen together, so the sync light settles in about a second instead of five — on launch and when you switch vaults
-- Opening a note no longer says "Syncing". The light at the top now describes your vault's connection, not whichever note you happen to have open, so it stops flickering every time you click a file
-- Fixed a loop where notes that were already synced kept syncing again: switching vaults could quietly drop incoming changes, and a note shared with you as view-only could never finish. Both now settle for good
-- If the connection drops, Baalda reconnects almost immediately instead of pausing for several seconds, and it can now tell a sign-in problem apart from a server that is simply restarting
-- Baalda now opens straight into your vault: the sidebar appears right away and signing in, syncing and indexing carry on in the background. Notes you click in those first moments still open safely
-- You can now leave a vault you don't own: Vault Settings → Vaults → Leave. The vault is removed from your devices, the owner is notified by email, and you get a receipt
-- Moving a Pro subscription to another vault now opens a clear dialog that shows each eligible vault with its members and explains what changes, instead of a bare dropdown
-- Large notes open faster and launching does less work up front: note history now moves between the app and its storage as raw data instead of text, and reopening a vault no longer rewrites index rows that did not change
-- Faster launch: the window now opens with the app already drawn instead of a blank frame, and Baalda loads about half as much code up front (and installs smaller)
-- The editor now selects text cleanly: highlighting a line or a paragraph no longer spills out into the margins
-- New notes start blank, and a note's title is simply its file name — the name in the tab, the sidebar and the search results all agree
-- Open notes moved into one row at the top: a soft highlight slides to the note you are reading, ⌘W closes it, Ctrl-Tab moves between them, and + starts a new note
-- Opening a note now reveals it in the sidebar, expanding the folders above it
-- Note properties at the top of a file (tags, dates) now render as a compact block instead of a giant bold heading
-- Lists read as normal text again, with only the bullet dimmed
-- A note's name now sits at the top of the note itself — click it to rename the file, and the tab, the sidebar and every list follow. New notes open with their name selected, ready to type
-- Properties at the top of a note are now a panel you can fill in, with real types for text, lists, numbers, checkboxes, dates and tags. Switch it to plain YAML or hide it in Settings → Appearance. Properties Baalda cannot read are shown as text and never rewritten, and the types you choose are remembered per vault (on this machine)
-- Tables are now editable in place: click a cell and type, Tab and Enter move between cells, Enter on the last row adds one, and right-clicking a cell inserts or deletes rows and columns or sets a column's alignment. The table stays a table the whole time — it never flips back to markdown pipes
-- The editor now reveals markdown one piece at a time: put the caret on a bold word and only that word's `**` appear, instead of every marker on the line. Click away and the whole note reads as a finished page
-- Bullets stay round dots while you type on the line, and every marker (#, >, quotes, backticks) is a quieter grey
-- `==Highlights==`, `%%private comments%%` and `#tags` now render properly — the same syntax Obsidian uses, so notes look right in both apps. Comments stay visible in the editor and tags become rounded pills
-- Callouts work: start a quote with `> [!note]`, `> [!tip]`, `> [!warning]`, `> [!danger]` or `> [!quote]` and it gets a matching colour, tint and icon
-- Code blocks are syntax-highlighted for the common languages and carry a Copy button
-- `[[Links]]` now show what they mean: `[[Note|label]]` shows the label, `[[Note#Heading]]` shows `Note › Heading`, and the brackets come back when you edit them
-- Fold a section away: hover the left edge of a heading, a list item, a callout or a code block and click the ›. Baalda remembers what you folded and brings it back when you reopen the note
-- Typing `#` now suggests the tags this vault already uses, most-used first — so `#idea` stays `#idea` instead of quietly becoming `#ideas`
-- More editing shortcuts: **⌘⇧H** highlights, **⌘⌥1**–**⌘⌥6** set a heading level (press the same one again to clear it), **⌘L** ticks a task or turns any line into one, and **⇧⏎** adds a line break inside a paragraph
-- Selecting a word and pressing **⌘K** is smarter: paste a link, select it, press ⌘K and the cursor lands where the words go
-- Faint guides now run down each level of a nested list
-- The editor keeps text in a readable column instead of stretching it across the whole window. Prefer it narrower, wider or full width? Settings → Appearance → Content width. Line numbers live there too, off by default
-- Opening a note no longer makes the whole window flash: the note area shows its loading bars right away, the sidebar row you clicked stays highlighted instead of blinking, and when Baalda reveals a note in the sidebar (from a tab, a link or search) the list now glides to it rather than jumping
-- Vault Settings → Access now has an Entire vault control that means it: pick Shared, Read-only or Private and it is applied to every folder and note, clearing the individual settings underneath. Baalda tells you how many it is about to clear before you confirm, and people you have shared something with by name keep their access
-- The Access page no longer opens on the wrong answer: it waits for your vault's real setting instead of flashing Private first, a folder you set to Shared inside a private vault now reads Shared, and clicking a folder or note slides the page down to its permission buttons
-- Settings rows have room to breathe, with a faint line between them so it is clear where one setting ends and the next begins
-- Content width is now a slider instead of an on/off switch: drag from a narrow column to a wide one, or all the way to full width, and a small preview shows how the text will sit in your window. The editor follows as you drag, and if the old setting never seemed to do anything for you, this one does
-- Making a whole vault Private now removes its notes from your teammates' devices, even if their app was closed at the time, the same as making a single folder private always did. Nothing is deleted on the server, so restoring someone's access brings it all straight back
-- When a vault is read-only, every folder and note in the sidebar now shows the lock, the same as locking a single item — except folders or notes you were given edit access to
-- If your vault's root is frozen and you move a note or folder to the top level from outside Baalda, Baalda now tells you why it could not sync it instead of quietly moving it back
-- When something is read-only for you, the server now refuses every kind of change to it, not just typing: new notes and folders inside it, attachments, and edits arriving from a connection that was opened before your access changed
-- Notes you wrote yourself are now kept in the vault's trash folder when your access to them is removed, instead of being removed outright. Notes other people shared with you are still removed
-- Baalda now double-checks with the server before it removes anything from your disk after an access change. If the two answers disagree, or the check cannot be made, the file stays where it is
-- Private now means private for everyone. Setting a vault to Private used to leave owners and admins reading every note in it, and left everyone the notes they had written themselves — so in a vault you set up yourself, pressing Private appeared to do nothing at all. It now seals the vault: nobody opens anything, you included, until you share a folder or a note by name. Nothing is lost, and switching back to Shared brings it all back. Vaults that were never shared with a team are not affected until you press it
-- The Access page's Entire vault control now shows what the team can actually reach. If you set every folder and note to Private one by one, it used to keep saying Shared; it now reads Private and tells you the vault-wide setting still says otherwise
-- Fixed a bug that could make a note grow enormous by repeating a block of its own text over and over. It happened while a note was syncing quietly in the background: Baalda could fold the same paragraph in twice, once as your copy and once as the one arriving from the server, then save the doubled text and do it again on the next change. One note reached 16 MB of a single section repeated thousands of times. Baalda now recognises the text as its own before merging it, and the server refuses to let any note grow past its size limit rather than only capping each change
+<!--
+  User-facing release notes. This file IS the GitHub release body and the in-app
+  "What's New" modal, so write it for the person who just got the update.
+
+  The rule, and the release workflow depends on it:
+
+  - One `## <version>` section per release, newest first, matching the version in
+    `app/apps/desktop/src-tauri/tauri.conf.json`.
+  - 2–5 points per section. Combine related changes into themes ("Sync light:
+    …", "Health page: …", "Editor: …") — never one bullet per commit.
+  - One or two sentences per point, ~200 characters at most. Plain language, no
+    file names, no issue numbers.
+  - `.github/workflows/release.yml` ships ONLY the section whose heading matches
+    the version being released (falling back to the topmost section), and strips
+    this comment. Old sections are history, not release copy — they must never
+    reappear under a new version.
+  - Every staging PR adds or edits ONLY the section for the version it will ship
+    in. If that section does not exist yet, create it at the top.
+-->
+
+## 0.1.61
+
+- Baalda now updates itself: it checks, downloads, installs and restarts at a quiet moment, and only shows the "Update required" screen if that fails. After a restart, What's New lists just the handful of things that changed in the version you got.
+- Vault Settings has a new Health page: a verdict on your vault, a row per unsynced note with fixes you can press, fifteen checks over your files, and a year of activity as a grid. Warnings can be ignored.
+- The sync light tells the truth: no "Syncing" flash when you open or switch notes, no light stuck on Syncing after launch, and no grey dots or folder counters while you are offline.
+- Signing in is steadier: a banner warns you across the note when you are signed out, Windows and Linux stay signed in between launches, and edits made outside Baalda really do reach the server.
+- Fixed a crash that emptied the whole window when you opened a locked or view-only note and then clicked another; the editor is now walled off so a failure there cannot take the app down. Baalda also opens sized to your screen, notes use the full width by default, Mermaid diagrams render in place, and the loading bars appear the moment you click a note.
+
+## 0.1.59
+
+- Baalda now connects to your vault almost as soon as it opens: connecting and checking the vault happen together, so the sync light settles in about a second instead of five.
+- The light at the top now describes your vault's connection rather than whichever note you have open, so it stops flickering every time you click a file.
+- Fixed notes that kept syncing again after they were already synced, and made reconnection near-instant when the connection drops.
+
+## 0.1.58
+
+- Private now means private for everyone. It used to leave owners, admins and authors reading everything, so pressing it in your own vault appeared to do nothing. Sharing again brings it all back.
+- Vault Settings → Access has an Entire vault control that is really applied: it clears the individual settings underneath, tells you how many first, and keeps the people you shared with by name.
+- Read-only vaults show the padlock on every folder and note, the server refuses every kind of change, and Baalda checks with the server before it removes anything from your disk.
+- Fixed a bug that could make a note balloon by folding the same paragraph in twice while it synced in the background — one note reached 16 MB. The server now caps a note's total size.
+- Content width is a slider from a narrow column to full width, settings rows have room to breathe, and opening a note no longer makes the window flash.
+
+## 0.1.57
+
+- A note's name now sits at the top of the note and is simply its file name. Click it to rename the file, and the tab, the sidebar and every list follow. New notes start blank.
+- Properties at the top of a note are a panel you can fill in, with real types for text, lists, numbers, checkboxes, dates and tags. YAML Baalda cannot read is shown as source and never rewritten.
+- The editor reveals markdown one marker at a time, so a finished note reads as a page. Callouts, highlights, comments, tags, wiki links and syntax-highlighted code blocks all render.
+- Tables are editable in place: click a cell and type, Tab and Enter move between cells, and right-clicking inserts or deletes rows and columns. It never flips back to markdown pipes.
+- Open notes moved into one row of tabs at the top, sections fold away and come back when you reopen a note, typing a tag suggests the ones you already use, and text sits in a readable column.
+
+## 0.1.56
+
+- Baalda opens straight into your vault: the sidebar appears right away while signing in, syncing and indexing carry on behind it. Launch is faster and the app installs smaller.
+- You can now leave a vault you don't own from Vault Settings → Vaults, and moving a Pro subscription to another vault opens a dialog that shows each eligible vault and explains what changes.

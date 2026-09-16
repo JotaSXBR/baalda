@@ -1,8 +1,10 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import "./App.css";
 import { AccountMenu } from "./components/AccountMenu";
 import { AsyncButton } from "./components/AsyncButton";
+import { Banner } from "./components/Banner";
+import { NotSyncingBannerView, notSyncingReason } from "./components/NotSyncingBanner";
+import { SyncIssuesBannerView, syncIssuesBanner } from "./components/SyncIssuesBanner";
 import { TalkButton } from "./components/TalkButton";
 import { BacklinksPanel } from "./components/BacklinksPanel";
 import { EditorEmpty, EditorSkeleton } from "./components/EditorPlaceholders";
@@ -30,9 +32,9 @@ import {
   installUpdate,
   isUpdateBlocking,
   justUpdatedTo,
-  releaseNoteLines,
   useUpdateState,
 } from "./lib/updater";
+import { notesForVersion, releaseNoteLines } from "./lib/releaseNotes";
 import { runConfetti } from "./lib/celebrate/celebrate";
 import { previewKind } from "./lib/preview";
 import { editorMeasureStyle } from "./lib/editorMeasure";
@@ -66,51 +68,6 @@ const AuthDialog = lazy(() =>
  *  off GitHub's CDN; 15 minutes keeps a long-running app reasonably current
  *  without pinging GitHub all day. */
 const UPDATE_POLL_MS = 15 * 60 * 1000;
-
-/**
- * Every banner in the app slides down out of the chrome it belongs to and
- * collapses its own height on the way out.
- *
- * The height animation is the part that matters: a banner that appears with
- * `display: none → block` shoves the editor down by 44px in one frame, and the
- * eye reads that as the *content* jumping rather than as a message arriving.
- * Animating `height` means the layout opens up for it, so attention follows the
- * banner instead of chasing the text that moved.
- */
-function Banner({
-  children,
-  show,
-  className = "",
-  role,
-}: {
-  children: React.ReactNode;
-  show: boolean;
-  className?: string;
-  role?: "status" | "alert";
-}) {
-  const reduceMotion = useReducedMotion();
-  return (
-    <AnimatePresence initial={false}>
-      {show && (
-        <motion.div
-          className="banner-slot"
-          initial={reduceMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
-          animate={reduceMotion ? { opacity: 1 } : { height: "auto", opacity: 1 }}
-          exit={reduceMotion ? { opacity: 0 } : { height: 0, opacity: 0 }}
-          transition={
-            reduceMotion
-              ? { duration: 0.12 }
-              : { type: "spring", stiffness: 380, damping: 34 }
-          }
-        >
-          <div className={`banner ${className}`.trim()} role={role}>
-            {children}
-          </div>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
-}
 
 /**
  * The file behind the open note vanished from disk (Finder, `rm`, a script, an
@@ -182,6 +139,75 @@ function DeletedByTeammateBanner() {
         </button>
       </div>
     </Banner>
+  );
+}
+
+/**
+ * The signed-out / no-access strip (#145).
+ *
+ * A user on a self-hosted server was signed out without noticing: the vault
+ * opened, the notes rendered, the edits were accepted, and the only thing that
+ * said otherwise was the sync pill in the sidebar corner, which reads "Offline"
+ * — a state that normally fixes itself. Days of external file edits and
+ * server-side MCP edits then merged character-by-character on the next sign-in.
+ * So the fact goes where the eyes are: a full-width strip above the note.
+ *
+ * Wired here, alongside the other banners, so `NotSyncingBannerView` stays a
+ * pure component and its one decision (`notSyncingReason`) stays unit-testable.
+ * Sign in raises the same card the account menu does, via the store's
+ * `authPrompt` — the one path that is already de-duplicated against the
+ * link-driven prompts (see `PromptedAuthDialog`).
+ */
+function NotSyncingBanner() {
+  const authStatus = useStore((s) => s.authStatus);
+  const hasSession = useStore((s) => s.session != null);
+  const syncStatus = useStore((s) => s.syncStatus);
+  const folderIsSynced = useStore((s) => s.openFolderIsSynced);
+  const noteOpen = useStore((s) => s.openNote != null);
+  const reason = notSyncingReason({
+    authStatus,
+    hasSession,
+    syncStatus,
+    folderIsSynced,
+    noteOpen,
+  });
+  return (
+    <NotSyncingBannerView
+      reason={reason}
+      onSignIn={() => useStore.getState().setAuthPrompt("sign-in")}
+      onOpenHealth={() => useStore.getState().requestSettings("health")}
+    />
+  );
+}
+
+/**
+ * The strip that says a finished sync run left notes behind, and points at the
+ * page that can explain each one.
+ *
+ * Wired here, alongside the other banners, so `SyncIssuesBannerView` stays a
+ * pure component and its one decision (`syncIssuesBanner`) stays unit-testable.
+ * The dismissal is local state on purpose: it is a view preference about ONE
+ * run, nothing else reads it, and keying it on the store's `failedRunToken`
+ * means the next failing run raises the banner again by itself.
+ */
+function SyncIssuesBanner() {
+  const syncEnabled = useStore((s) => s.syncEnabled);
+  const progress = useStore((s) => s.syncProgress);
+  const runToken = useStore((s) => s.failedRunToken);
+  const [dismissedRunToken, setDismissedRunToken] = useState<number | null>(null);
+  const { show, failed } = syncIssuesBanner({
+    syncEnabled,
+    progress,
+    runToken,
+    dismissedRunToken,
+  });
+  return (
+    <SyncIssuesBannerView
+      show={show}
+      failed={failed}
+      onOpenHealth={() => useStore.getState().requestSettings("health")}
+      onDismiss={() => setDismissedRunToken(runToken)}
+    />
   );
 }
 
@@ -352,32 +378,34 @@ function VaultFolderPrompt() {
 }
 
 /**
- * Full-screen REQUIRED-update wall. Updates are not optional: the moment a
- * newer version is discovered (at launch or by the background poll) this covers
- * the whole window and the only way forward is "Install & Restart". No "Later".
+ * Full-screen REQUIRED-update wall — the FALLBACK path, not the normal one.
  *
- * Why a wall and not a bar: every dismissible banner left part of the fleet on
- * old builds, and old builds are exactly where the bugs we just fixed live —
- * one stale client can resurrect deleted folders for a whole team. Keeping
- * everyone on the latest version is a correctness feature here, not a nag.
+ * Updates install themselves: a newer version found at launch or by the poll is
+ * downloaded, installed and restarted into silently, and this component never
+ * renders. It appears only once the silent path has spent both its attempts
+ * (`failed`), when the app is knowingly stale and needs the user to fix a
+ * network before it can heal itself.
  *
- * The version is LATCHED: once `available` has been seen, an install error
- * keeps the wall up with a retry rather than letting a known-stale build back
- * in. A failed background *check* (offline launch, dev build without the
- * updater) never had an `available` to latch, so it never walls anything off.
- * Local edits stay safe throughout — notes are on disk, and `installUpdate`
- * flushes the open note before relaunching.
+ * Why a wall rather than a dismissible bar at that point: old builds are
+ * exactly where the bugs we just fixed live — one stale client can resurrect
+ * deleted folders for a whole team. Keeping everyone on the latest version is a
+ * correctness feature here, not a nag.
+ *
+ * The version is LATCHED on `failed`, so the wall stays up through a manual
+ * retry and its download progress instead of vanishing mid-install and letting
+ * a known-stale build back in. A failed background *check* (offline launch, dev
+ * build without the updater) never reaches `failed`, so it still walls nothing
+ * off. Local edits stay safe throughout — notes are on disk, and
+ * `installUpdate` flushes the open note before it touches anything.
  */
 function UpdateGate() {
   const update = useUpdateState();
   const [required, setRequired] = useState<string | null>(null);
   useEffect(() => {
-    if (update.phase === "available") setRequired(update.version);
+    if (isUpdateBlocking(update) && "version" in update) setRequired(update.version);
   }, [update]);
 
-  if (!isUpdateBlocking(update) && !(update.phase === "error" && required)) {
-    return null;
-  }
+  if (!required) return null;
 
   const pct =
     update.phase === "downloading" && update.total > 0
@@ -385,6 +413,21 @@ function UpdateGate() {
       : null;
 
   const version = ("version" in update ? update.version : null) ?? required;
+
+  // Once the wall is up the only thing left in the window is this card, so a
+  // manual retry restarts the moment it can — the quiet-moment wait exists to
+  // protect someone who is typing, and nobody is typing behind the wall.
+  const retry = async () => {
+    // Re-discover then install: the failed attempt may have died at either
+    // stage, and checkForUpdate re-arms the pending update.
+    if (await checkForUpdate()) await installUpdate({ waitForQuiet: false });
+  };
+
+  const working =
+    update.phase === "checking" ||
+    update.phase === "downloading" ||
+    update.phase === "installing" ||
+    update.phase === "ready";
 
   // Escape hatch beside the install CTA: flush the open note, then reboot the
   // webview — same as the reload shortcut. Useful when a wall raised by a
@@ -412,28 +455,14 @@ function UpdateGate() {
           <h1>Update required</h1>
           {version && <span className="update-gate-version">v{version}</span>}
         </div>
-        {update.phase === "available" && (
-          <>
-            <p>
-              A new version of {BRAND_NAME} is ready. Installing takes a moment, and your
-              notes stay right where they are — on your disk.
-            </p>
-            <div className="update-gate-actions">
-              <AsyncButton className="primary update-gate-cta" onClick={() => installUpdate()}>
-                Install Update
-              </AsyncButton>
-              <button className="ghost-pill lg" onClick={() => void reload()}>
-                Reload
-              </button>
-            </div>
-          </>
-        )}
-        {(update.phase === "downloading" || update.phase === "installing") && (
+        {working && (
           <>
             <p role="status">
-              {update.phase === "installing"
-                ? "Installing — the app will restart itself…"
-                : `Downloading v${update.version}${pct != null ? ` — ${pct}%` : "…"}`}
+              {update.phase === "checking"
+                ? "Checking for the update…"
+                : update.phase === "downloading"
+                  ? `Downloading v${update.version}${pct != null ? ` — ${pct}%` : "…"}`
+                  : "Installing — the app will restart itself…"}
             </p>
             {/* A determinate bar when the server sent a content length, an
                 indeterminate sweep when it didn't — a bar that fills to an
@@ -453,22 +482,16 @@ function UpdateGate() {
             </div>
           </>
         )}
-        {update.phase === "error" && required && (
+        {!working && (
           <>
             <p>
-              The update to <strong>v{required}</strong> didn&rsquo;t finish
-              {update.message ? ` — ${update.message}` : ""}. Check your connection and try
-              again.
+              {BRAND_NAME} couldn&rsquo;t install the update to <strong>v{required}</strong>
+              {"message" in update && update.message ? ` — ${update.message}` : ""}. It tried
+              twice on its own. Check your connection and try again — your notes stay right
+              where they are, on your disk.
             </p>
             <div className="update-gate-actions">
-              <AsyncButton
-                className="primary update-gate-cta"
-                onClick={async () => {
-                  // Re-discover then install: the failed attempt may have died at
-                  // either stage, and checkForUpdate re-arms the pending update.
-                  if (await checkForUpdate()) await installUpdate();
-                }}
-              >
+              <AsyncButton className="primary update-gate-cta" onClick={retry}>
                 Try again
               </AsyncButton>
               <button className="ghost-pill lg" onClick={() => void reload()}>
@@ -484,7 +507,9 @@ function UpdateGate() {
 
 /**
  * "What's New" — a centered modal shown on the first launch after an update,
- * with the release's one-liners and a one-shot confetti burst. A modal rather
+ * with that version's handful of points and a one-shot confetti burst. Only
+ * that version's: the notes are per-release now, so nobody reads a fresh
+ * update's dialog and sees changes they already had. A modal rather
  * than a banner: the old top strip pushed the whole page down, which read as
  * the content jumping. Stays until dismissed (the stash survives a quit), so
  * an update never lands completely unannounced.
@@ -499,9 +524,14 @@ function WhatsNewModal() {
     let cancelled = false;
     void justUpdatedTo().then((stash) => {
       if (cancelled || !stash) return;
-      // A wider cap than the banner's: this is a dialog with room, and a
-      // release that changed ten things should say so rather than stop at six.
-      setUpdated({ version: stash.version, notes: releaseNoteLines(stash.notes, 12) });
+      // Only the section for the version we were actually given, and at most
+      // five points of it. The body used to be the whole cumulative notes file,
+      // so every update opened on twelve bullets from releases already
+      // installed; the workflow ships one section now and this is the backstop.
+      setUpdated({
+        version: stash.version,
+        notes: releaseNoteLines(notesForVersion(stash.notes, stash.version), 5),
+      });
     });
     return () => {
       cancelled = true;
@@ -559,7 +589,8 @@ function WhatsNewModal() {
             <h2 className="whats-new-title">What&rsquo;s New</h2>
             <span className="whats-new-version">v{updated.version}</span>
             <p className="whats-new-sub">
-              {BRAND_NAME} just updated itself — here&rsquo;s what changed.
+              {BRAND_NAME} updated itself to the latest version — here&rsquo;s what
+              changed.
             </p>
           </div>
           {updated.notes.length > 0 && (
@@ -618,6 +649,11 @@ function SyncIndicator({ noteOpen }: { noteOpen: boolean }) {
       // "N not synced" carries its own remedy: one click re-pulls the registry
       // and re-runs the content pass for everything still unconfirmed.
       onRetry={syncEnabled ? () => void syncManager.retrySync() : undefined}
+      // …and when a run has actually failed, the first click should EXPLAIN
+      // rather than retry: a note the server refused for its size only re-fails.
+      onOpenHealth={
+        syncEnabled ? () => useStore.getState().requestSettings("health") : undefined
+      }
     />
   );
 }
@@ -676,6 +712,7 @@ function PromptedAuthDialog() {
 export default function App() {
   const vault = useStore((s) => s.vault);
   const openNote = useStore((s) => s.openNote);
+  const openingNotePath = useStore((s) => s.openingNotePath);
   const switchingVault = useStore((s) => s.switchingVault);
   // Version history is a synced-vault feature: it needs the note's docId on the
   // server. No mapping (local vault, unregistered note) → no history button.
@@ -785,9 +822,14 @@ export default function App() {
         .getState()
         .initAuth()
         .catch((e) => console.error("auth init failed", e));
-      // Check for updates at launch AND on a background poll, but never install
-      // uninvited: a found release raises the required-update wall (UpdateGate),
-      // and the download/relaunch waits for the user's "Install & Restart" click.
+      // Check for updates at launch AND on a background poll, and install what
+      // we find WITHOUT asking: a found release is downloaded and installed
+      // silently, then the app restarts itself at the next pause in typing (see
+      // lib/quietMoment.ts). Nothing is shown on the way through — the user
+      // meets the new version in the What's New modal after the restart. The
+      // required-update wall (UpdateGate) is the fallback for when that silent
+      // path has failed twice.
+      //
       // Failures (offline, non-bundled dev build) are swallowed by the updater
       // store — surfaced only in Settings → Updates. App-lifetime interval —
       // never cleared, and the launch guard above keeps it single in dev
@@ -795,8 +837,8 @@ export default function App() {
       //
       // Not in a dev build: `tauri dev` still has the updater plugin and it
       // polls PRODUCTION's `latest.json`, so the day after any release every
-      // dev session opened the required-update wall — and "Install" then asked
-      // Tauri to relaunch a `cargo run` binary, which quit the app outright.
+      // dev session would silently download a release bundle and then ask Tauri
+      // to relaunch a `cargo run` binary, which quits the app outright.
       if (!import.meta.env.DEV) {
         void backgroundUpdateCheck();
         setInterval(() => void backgroundUpdateCheck(), UPDATE_POLL_MS);
@@ -1170,6 +1212,8 @@ export default function App() {
               </svg>
             </button>
           </header>
+          <NotSyncingBanner />
+          <SyncIssuesBanner />
           <RemovedBanner />
           <DeletedByTeammateBanner />
           <div className="editor-wrap">
@@ -1187,8 +1231,25 @@ export default function App() {
                   </div>
                 }
               >
-                <Editor />
+                {/* The editor is the one subtree that binds React to
+                    CodeMirror, and a throw anywhere in it used to unmount the
+                    WHOLE app to a blank window with no message — the crash that
+                    `lib/editor/effectDispatch.ts` describes reached users that
+                    way, undiagnosable because release builds carry no logging.
+                    `resetKeys` on the note path means switching notes (or
+                    reopening this one) clears the fallback and tries again. */}
+                <ErrorBoundary label="Editor" resetKeys={[openNote.path]}>
+                  <Editor />
+                </ErrorBoundary>
               </Suspense>
+            ) : openingNotePath ? (
+              // First open of the session: there is no `<Editor>` mounted yet to
+              // draw its own skeleton, and the registration round trip happens
+              // before `openNote` exists — so without this the very first click
+              // showed "Select a note" for the whole wait.
+              <div className="editor-column" style={editorMeasureStyle(editorMeasure)}>
+                <EditorSkeleton />
+              </div>
             ) : (
               <EditorEmpty />
             )}

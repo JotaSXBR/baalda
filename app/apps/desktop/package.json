@@ -1,7 +1,7 @@
 {
   "name": "desktop",
   "private": true,
-  "version": "0.1.59",
+  "version": "0.1.61",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -51,6 +51,7 @@
     "codemirror": "^6.0.2",
     "d3-force": "^3.0.0",
     "diff-match-patch": "^1.0.5",
+    "mermaid": "^11.17.2",
     "motion": "^12.42.2",
     "react": "^19.1.0",
     "react-arborist": "^3.13.2",

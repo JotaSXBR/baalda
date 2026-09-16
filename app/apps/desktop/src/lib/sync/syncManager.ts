@@ -77,6 +77,13 @@ export interface DocSyncOptions {
   wsUrl?: string;
   onStatus?: (status: SyncStatus) => void;
   /**
+   * Fired when the mint came back **401** — the server refused the SESSION, not
+   * this document. Routed to one central guard (`sessionGuard.ts`, injected by
+   * `docSession.ts`) which re-checks the session before anything signs the app
+   * out; the status verdict below is unchanged either way.
+   */
+  onSessionRejected?: () => void;
+  /**
    * Fired when the set of *unsynced* local changes opens/closes: `true` the
    * moment a local edit is made (not yet acked by the server), `false` once
    * everything has flushed. Drives the "Saving…" badge state.
@@ -165,6 +172,7 @@ export class DocSync {
   private readonly api: ApiClient;
   private readonly docId: string;
   private readonly onStatus?: (status: SyncStatus) => void;
+  private readonly onSessionRejected?: () => void;
   private readonly onPending?: (pending: boolean) => void;
   private readonly onFlushed?: () => void;
   private readonly settleDelayMs: number;
@@ -184,6 +192,14 @@ export class DocSync {
    * about it.
    */
   private unsyncedCount = 0;
+  /**
+   * Local document updates made while the provider was NOT yet synced — the
+   * only edits the handshake can hide. See `onSynced` for why the provider's
+   * count cannot answer this on its own.
+   */
+  private editsDuringHandshake = 0;
+  /** The Y.Doc this provider carries; kept so the update listener can be removed. */
+  private readonly doc: Y.Doc;
   /** Waiters parked in {@link whenFlushed}. */
   private flushWaiters: Array<(ok: boolean) => void> = [];
   /**
@@ -198,9 +214,11 @@ export class DocSync {
     this.api = opts.api;
     this.docId = opts.docId;
     this.onStatus = opts.onStatus;
+    this.onSessionRejected = opts.onSessionRejected;
     this.onPending = opts.onPending;
     this.onFlushed = opts.onFlushed;
     this.settleDelayMs = opts.settleDelayMs ?? 700;
+    this.doc = opts.doc;
 
     const wsUrl = opts.wsUrl ?? deriveWsUrl(this.api.getBaseUrl());
     const name = `vault:${opts.vaultId}/note:${opts.docId}`;
@@ -314,6 +332,20 @@ export class DocSync {
         }
       },
       onSynced: () => {
+        // Take over the indicator ONLY for an edit typed during the connect.
+        //
+        // The provider's count is no witness here. `startSync` resets it to 1
+        // for the sync-step it is about to send, and the server's own
+        // sync-step-2 flips `synced` while that unit is still outstanding (its
+        // `SyncStatus` ack answers OUR step 2, which goes out after). So on every
+        // clean note open this fires with count 1 and nothing to send — reading
+        // "count > 0" as pending painted "Syncing…" until the ack plus the
+        // settle delay, on every single click. Only a document update we saw
+        // ourselves during the handshake is an edit the server may not have.
+        if (!this.destroyed && this.editsDuringHandshake > 0 && this.unsyncedCount > 0) {
+          this.setPending(true);
+        }
+        this.editsDuringHandshake = 0;
         if (!this.destroyed && !isTerminalSyncStatus(this._status)) {
           this.noteAuthSuccess();
           this.setStatus(this._readOnly ? "read-only" : "synced");
@@ -335,6 +367,13 @@ export class DocSync {
             clearTimeout(this.settleTimer);
             this.settleTimer = null;
           }
+          // Before the initial sync the count is the HANDSHAKE — the sync-step
+          // and awareness messages the provider queues while the socket comes
+          // up — not an edit anyone made. Reporting it as pending turned every
+          // note open into "Syncing…" for the length of the connect. Edits made
+          // during that window are not lost to the indicator: `onSynced`
+          // re-reads the count once the handshake is out of the way.
+          if (!this.provider.isSynced) return;
           this.setPending(true);
           return;
         }
@@ -353,7 +392,19 @@ export class DocSync {
     });
 
     this.awareness = this.provider.awareness as Awareness;
+    this.doc.on("update", this.trackHandshakeEdit);
   }
+
+  /**
+   * Count a local edit made before the initial sync. Updates the provider
+   * applied (remote ops) carry the provider itself as their origin and are not
+   * edits of ours; anything else — a keystroke, a disk ingest — is content the
+   * server may still be missing when `onSynced` fires.
+   */
+  private readonly trackHandshakeEdit = (_update: Uint8Array, origin: unknown): void => {
+    if (this.destroyed || origin === this.provider) return;
+    if (!this.provider.isSynced) this.editsDuringHandshake++;
+  };
 
   get status(): SyncStatus {
     return this._status;
@@ -473,8 +524,15 @@ export class DocSync {
       // out of. A 401 means the stored session is no longer valid (expired, or
       // the user no longer exists on this server) — not this doc's fault, so it
       // reads as offline and lets the backoff stretch instead of retrying hard.
-      const status = mintFailureStatus(e instanceof ApiError ? e.status : undefined);
+      const httpStatus = e instanceof ApiError ? e.status : undefined;
+      const status = mintFailureStatus(httpStatus);
       this.setStatus(status);
+      // …and the one thing "offline" cannot express: a 401 is the SESSION being
+      // refused, and every mint from here (this doc's refresher, the next doc's
+      // first connect, the vault channel) will get the same answer. Announced
+      // rather than acted on — the guard on the other end re-checks the session
+      // before the app calls itself signed out. See `sessionGuard.ts`.
+      if (httpStatus === 401) this.onSessionRejected?.();
       if (isTerminalSyncStatus(status)) {
         this.refresher.cancel();
         // Terminal: anything waiting on a flush will never get one.
@@ -575,6 +633,7 @@ export class DocSync {
       this.authRetryTimer = null;
     }
     this.refresher.cancel();
+    this.doc.off("update", this.trackHandshakeEdit);
     try {
       this.provider.destroy();
     } catch {

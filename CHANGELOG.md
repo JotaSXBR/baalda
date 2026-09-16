@@ -53,6 +53,193 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **"Syncing" on note open, third cause — the provider handshake.** Hocuspocus
+  reports `onUnsyncedChanges` for the sync-step/awareness messages it queues
+  while the socket comes up, and `DocSync` turned any count > 0 into
+  `pending`, which the pill renders as "Syncing…" for the length of the
+  connect. `DocSync` now ignores the count until `provider.isSynced`. The first
+  cut then re-read the count in `onSynced`, which moved the flash rather than
+  removing it: `startSync` resets the count to 1 for the sync-step it sends,
+  and the server's sync-step-2 flips `synced` while that unit is still
+  outstanding (its `SyncStatus` ack answers our step 2, sent after), so every
+  clean open reached `onSynced` with count 1 and painted "Syncing…" until the
+  ack plus the 700 ms settle — and re-stamped "Synced · just now" on the way
+  out. `DocSync` now watches the Y.Doc for local updates made during the
+  handshake (anything whose origin is not the provider) and lets `onSynced`
+  take over the indicator only for those. Four tests in `docSyncAuth.test.ts`,
+  one of them the real wire order.
+- **"Syncing" on note open, second cause.** Opening a note connects its doc;
+  the server's version capture stamps `last edited` on the first change of a
+  session and broadcasts `registry-changed`; every client then re-pulls the
+  registry, and `syncStructure` announced `phase("registering", 0)` even with
+  nothing to create — the pill showed "Syncing" for one listing round-trip. The
+  announcement is now gated on `missingFolders + missingNotes > 0`; the initial
+  `reconcile` keeps its own early "life" announcement. Server behaviour is
+  unchanged (the stamp is what makes `notes.updated_at` truthful, #104).
+- **"Syncing" flash on every note open/switch.** `ContentUploader.run()`
+  announced `phase("uploading", n)` and stamped every queued doc `queued`
+  BEFORE the per-note ingest fast-path decided whether anything had changed, so
+  a local-change run made of nothing but our own egest echo flipped the pill
+  to "Syncing 0/1" and straight back. New `lazyPhase` option (set by
+  `runLocalChangePush`): the phase is announced — sized to the notes not yet
+  settled — the first time a note needs `connect()` or fails; quiet settles
+  before that neither change the phase nor bump the previous phase's counters,
+  and still stamp `synced`. Three tests in `contentUpload.test.ts`. Each
+  local-change queue site now records a `push-queued` timeline entry naming
+  the trigger (changed on disk while closed / renamed on disk / merged an
+  outside edit), so "why did it sync?" is answerable from the Health page.
+- **Tab bar:** no hover fill on inactive tabs; `.tab-close` has equal margins
+  and no UA padding; the active card's fillets are back at `--tab-radius`
+  (14px) and start ON the border column, so the card's straight side turns
+  into the arc instead of continuing past it (the "stubs").
+- **Sidebar sync marks hidden until the server answers** (`sidebarMarksVisible`
+  in `syncRollup.ts`, consulted by `FileTree`'s index memo). An offline launch
+  drew a hollow dot on every note and a "0/N" wave on every folder: the registry
+  stamps notes `queued` as it tries to register them and, offline, nothing ever
+  resolves the stamp. With `syncStatus` in `offline` / `connecting` / `error` /
+  `no-access` the tree draws no marks; `read-only` and the per-doc terminal
+  states count as answers. The wave tracker is not reset, so counters resume
+  rather than restart when the channel returns.
+- **Run stuck at "Syncing" when the vault channel settled before the reconcile
+  returned.** Since the prime-window change (v0.1.60) the channel starts before
+  `registry.reconcile()`, so on a small vault its `ready` and the backfill's
+  idle edge both land while the reconcile is still running. `beginDownloadPhase`
+  then armed a phase whose only exit — `handleInboundIdle` — had already fired,
+  and the 30 s watchdog stood down because `vaultStatus` was `synced`. It now
+  takes the edge immediately when the channel is already synced AND the backfill
+  is settled (the `synced` guard keeps an unconnected engine, which also reports
+  settled, from ending the phase early). Regression test in
+  `docSessionEnablePhases.test.ts` fails against the staging copy.
+- **A signed-out synced vault looked exactly like a healthy one** (#145, part 1).
+  The vault opened, notes rendered, edits were accepted, and the only hint was
+  the corner pill — which a user missed for days while external edits and
+  server-side MCP edits diverged, then merged as interleaved text on re-auth.
+  A full-width `NotSyncingBanner` now sits across the top of the note pane
+  (under the main header, above the editor) whenever the open folder is a
+  SYNCED vault (`openFolderIsSynced`, the folder's own `.context/config.json`
+  stamp, so it answers while signed out) and either `authStatus` is not
+  `signed-in` / there is no session — "Signed out — your changes are not
+  syncing" with a Sign in button that opens the existing auth card — or a note
+  is open with `syncStatus === "no-access"`. It stays silent while auth is
+  still loading, for local vaults, and for plain offline/reconnecting, which
+  the pill owns. The shared `Banner` slot moved out of `App.tsx` into
+  `components/Banner.tsx` so all four banners are literally one component. The
+  banner also fires when the session lapses MID-RUN, which is the reporter's
+  actual case: a 401 at any token mint (per-doc provider, the 60 s pre-expiry
+  refresh, the vault channel's connect/reauth) reaches one
+  `SessionRejectionGuard` (`lib/sync/sessionGuard.ts`) that coalesces the burst,
+  re-checks the session with `GET /api/auth/get-session`, and only on "gone"
+  flips the store to `signed-out` (vault stays open, editor keeps working, sync
+  stops minting) and drops the keychain token; a transient 401 with a still-valid
+  session changes nothing. The reporter's second ask — conflict copies instead
+  of character-level merges on re-auth — is not part of this change.
+- **The session token never survived a restart on Windows or Linux.** keyring 3
+  has no default credential store: only `apple-native` was enabled in
+  `src-tauri/Cargo.toml`, so every other platform silently fell back to the
+  crate's in-memory mock and the app started signed out on every launch (#136,
+  and the Linux half of #129). `windows-native` (Credential Manager) and
+  `sync-secret-service` + `crypto-rust` (D-Bus Secret Service, the only Linux
+  store that outlives a reboot) are now on; both release workflows install
+  `libdbus-1-dev` for it. `keychain.rs` asks the built store for its
+  persistence at first use and logs an error if a future feature edit ever
+  reinstates the mock, and a unit test pins the feature list.
+- **A note materialized from the server carried two identities for life.**
+  `writeNoteIfMissing` let Rust's indexer mint a fresh `notes.id` for the new
+  file and nothing rebound it to the server's `doc_id`, so `Editor.tsx` keyed
+  its bridge by the index id while `DocSync` keyed by the registry id — two
+  `Y.Doc`s, two local CRDT logs, one `.md` (6,469 of 6,496 notes in one joined
+  vault; a 286 MB `index.sqlite`). The materialize step now calls
+  `ipc.rebindNoteId` right after the file is created and before anything can
+  open it (#147). Forward fix only: vaults forked by older builds are not
+  repaired here.
+- **Two paths for one note pinned the header at "Syncing 0/N" forever.**
+  `POST /api/notes` with a `doc_id` the vault already holds at another path is
+  an idempotent no-op that echoes the canonical `rel_path`; the bulk
+  create-missing-notes pool ignored the echo and mapped the LOCAL path to that
+  id, so `byPath` carried two keys for one identity, `byDocId` pointed at the
+  stale copy, both were persisted to `.context/config.json`, and every pull
+  re-registered the alias (resetting the `registering` counter to 0/N) while the
+  canonical file lost its badge (#129, client half; the server's reauth loop was
+  #140). The pool now refuses to map a path the server says is a duplicate,
+  records it once as "already registered at <path>" and remembers it so the pull
+  stops asking; `setMapping` enforces one path per `doc_id`; config load dedupes
+  aliases minted by older builds; pruning an alias no longer deletes the
+  canonical path's reverse entry; and `planInbound` refuses a rename onto a path
+  another local note already occupies instead of planning one Rust rejects on
+  every pass. The stale file is left on disk, unmapped.
+- **An external edit merged by `hydrate`'s debounced ingest could be marked
+  synced without ever leaving the device.** `NoteBridge.hydrate` arms a 150 ms
+  ingest to reconcile a file that moved on while the doc was closed; if it fired
+  while `ContentUploader.pushOne` was still awaiting its own `readFile`, the
+  uploader's `ingestNow()` found the file already merged, answered `false`, and
+  the no-socket fast path called `markPushed`. The bridge now remembers a disk
+  merge no `ingestNow()` caller has been told about and reports it on the next
+  call (#104). The write shapes themselves (`>`, `>>`, create) were never
+  distinguishable — verified with a real FSEvents probe — and the reporter's
+  "never arrives" was `notes.updated_at`, which the server stamped at most once
+  a minute per editor; the row is now stamped on EVERY stored edit and only the
+  vault-wide `registry-changed` broadcast stays throttled. `runLocalChangePush`
+  also re-queues its batch when a newer run supersedes it.
+- **A Windows join failed with a bare "The system cannot find the file
+  specified. (os error 2)" on both folder-setup buttons.** `AppError`'s blanket
+  `From<io::Error>` dropped the operation and the path, so three different
+  `create_dir_all`/`write` calls on the vault-open path produced the same
+  message (#128). `error::io_ctx(op, path)` now renders "Couldn't create the
+  folder <path>: <os error>" and logs it; every I/O call on that path uses it.
+  Release builds write a rotating log file (`LogDir`, 2 MB, keep one:
+  `~/Library/Logs/com.baalda.context/baalda.log`,
+  `%LOCALAPPDATA%\com.baalda.context\logs\baalda.log`). `config_path` probes
+  the app config dir for writability and falls back to `app_local_data_dir`
+  when a redirected or offline roaming profile refuses it.
+- **A teammate who joined a vault never showed up on the owner's sidebar.**
+  Presence was the one caller that fell back to the LOCAL index id when the
+  registry had no mapping yet (a note opened while the post-join reconcile was
+  still running), the server dropped the unreadable id silently, and the value
+  was cached and replayed on every reconnect for the rest of the session (#125).
+  `setViewing` now records the PATH; the doc id is resolved through the registry
+  at every send, re-announced (coalesced, only when the resolved id changed)
+  when the map changes, and the fallback is `null`, never a local id. Presence
+  and the sidebar's `peersForNode` resolve paths case-insensitively via
+  `getMappingCi`, and a frame for an unmapped path warns once per session.
+- **Switching between two locked notes took the whole app down to a blank
+  window.** `ReactWidget.toDOM`/`updateDOM` call `flushSync` from inside a
+  CodeMirror DOM update (deliberately — it is what makes CM6 measure a widget's
+  real height on the first frame), and React answers a `flushSync` by flushing
+  the WHOLE app root's pending passive effects, not just the widget's own tree.
+  So `Editor`'s `[readOnly]` effect re-entered the update it had itself started
+  and CodeMirror threw `Calls to EditorView.update are not allowed while an
+  update is in progress`. Only locked notes reached it: opening the first one
+  populates the `locks` store (via the `read-only` status → `refreshLocks`), so
+  every locked note after it is built read-only from frame one, and the
+  teardown's transient vault-channel `"synced"` then flipped `readOnly`
+  false→true — two reconfigures, each rebuilding the note-header widgets whose
+  decorations key off `state.readOnly`. All three compartment reconfigures now
+  go through `lib/editor/effectDispatch.ts`, which defers to a microtask (after
+  the update unwinds, still before paint) and drops the transaction if the note
+  was switched meanwhile. `<Editor>` is additionally wrapped in an
+  `ErrorBoundary` — it had none, which is why a single throw cost the entire
+  window with no message anywhere, in a release build that carries no logging.
+- **The teardown's phantom `"synced"` granted edit access to a note that never
+  had it.** `syncManager.closeCurrent()` nulls its own status and re-emits, so
+  between one note's teardown and the next note's `openDoc` the badge falls back
+  to the vault channel's — normally `"synced"`. `Editor`'s `[syncStatus]` effect
+  read that as a grant and set `hadEditAccessRef`, which permanently disabled the
+  pre-verdict keystroke rollback for the rest of the session: anything typed on a
+  later locked note before its read-only verdict landed stayed in the local
+  Y.Doc, egested to the `.md` and forked against the server. Now gated on
+  `bridgeRef.current`, which is null for exactly that window.
+- **The note loading skeleton only covered the second half of an open.** The
+  editor column branched on `openNote`, which `openNoteByPath` sets only after
+  `getNoteMeta` and `registerNote`; `openingNotePath` — set on the click — was
+  read by the sidebar row and the tab bar but never by the editor. On a first
+  open there was no `<Editor>` mounted at all, so the column showed "Select a
+  note" for the whole wait. Both now render the skeleton. Its hold also drops
+  from 180ms to 90ms: that number was tuned against a dev build, where
+  StrictMode double-invokes the open effect and the pane therefore sits empty
+  about twice as long as in a release build — an open landing between the two
+  painted a bare pane and then the text, which is the "loader works locally, not
+  in production" report. `[data-immediate]` now zeroes the delay instead of
+  killing the animation, so the bars no longer snap to full opacity mid-fade.
 - **A client reauthed itself over its own registry writes.** Every
   `registry-changed` ran `refreshAcl({ reauth: "if-changed" })` with no origin
   self-exclusion, so a client's own pull registering notes grew its own readable
@@ -87,6 +274,23 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   so a refused credential stops the ladder instead of being retried.
 
 ### Changed
+- **Activity as a per-day heat-map.** `vault_stats` gains `activity.days`
+  (371 calendar days = 53 week columns, oldest first, today last) cut at the caller's local
+  midnight (`todayStartMs`, new optional command arg; `None` ⇒ rolling 24 h
+  windows) because Rust has no timezone table to guess with. `format.ts
+  activityGrid` lays the series out GitHub-style — a column per week, Sunday-
+  first rows, month labels where a month's first day falls, today ringed — and
+  `HealthActivity` renders it with five accent shades and a Less/More legend.
+  The weekly strip is gone; `activity.weeks` stays in the payload.
+- **Content width defaults to full** (`prefs.ts EDITOR_MEASURE_UNSET`). A device
+  with no stored choice — and a blank or unreadable value — reads `"full"`; a
+  stored measure is untouched, and the legacy "Readable line length" switch still
+  migrates (`off` → full, anything else → 88ch). `EDITOR_MEASURE_DEFAULT` (88)
+  stays the clamp's NaN fallback and the slider's readable stop.
+- **Main window sized to the screen on launch** (`lib.rs fit_window_to_screen`,
+  before reveal so the first frame is already right): 79% × 88% of the current
+  monitor's work area in logical pixels, centered, never below the config's
+  1200×800 unless the screen is smaller, capped at 2000×1400.
 - **Pressing Private seals the vault, for the person who pressed it too.** The
   control used to express Private by DELETING the vault's grant row, and absence
   already meant something else: a vault that was never shared, which is the
@@ -314,6 +518,135 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **Updates install themselves, with the wall as the fallback.** The app no
+  longer waits for a click to install an update it has already downloaded: it
+  checks, downloads, installs and relaunches at a quiet moment. The blocking
+  "Update required" screen is kept only for when that automatic install fails,
+  so a user is never stranded on a build that cannot update itself.
+- **Per-version release notes.** `docs/RELEASE_NOTES.md` is now a stack of
+  `## <version>` sections, newest first, each holding 2–5 *combined* user-facing
+  points rather than one bullet per change; an HTML comment at the top carries
+  the authoring rules and is stripped before publishing. `release.yml`'s
+  **Release notes** step extracts only the section matching
+  `needs.gate.outputs.version` (falling back to the topmost section, then to the
+  one-line placeholder) instead of `cat`ting the whole cumulative file, which is
+  what made every update's What's New open on twelve bullets the user had
+  already seen. `staging-release.yml` appends the topmost section under its
+  tester warning, because at staging the version bump has not happened yet. New
+  `lib/releaseNotes.ts` is the desktop backstop: `notesForVersion(body, version)`
+  narrows a multi-section body to the received version (first section if nothing
+  matches, whole body if there are no headings, HTML comments stripped) and
+  `releaseNoteLines` now caps at five. `releaseNoteLines` moved there out of
+  `lib/updater.ts`. Covered by `src/lib/__tests__/releaseNotes.test.ts`.
+- **Health page: ignore, skip, take action.** `lib/health/ignore.ts` +
+  `useHealthIgnores` keep a per-vault, per-device list (`localStorage`
+  `context.healthIgnored:<vaultPath>`) of ignored check ids and dismissed issue
+  keys. `HealthChecks` drops an ignored failing check from its groups and
+  headline into an "Ignored · N" drawer with Show again; `HealthIssues` does the
+  same for rows (plus "Ignore selected" in the bulk bar) and counts only live
+  rows in its chips. Metric flags in the strip ("1 broken", "0 bytes",
+  "reclaimable") are buttons that restore-if-ignored, open and scroll to the
+  matching check (`CheckFocus`, nonce-keyed so a repeat click scrolls again).
+- **Vault Settings → Health.** One page for "what is synced, what is not, why, and
+  what is in this vault". A verdict card (`local` / `signed-out` / `no-access` /
+  `offline` / `connecting` / `syncing` / `attention` / `healthy`, most urgent
+  first) with Sync now, Refresh and Copy diagnostics; a five-stage pipeline
+  diagram (files on disk → local index → local history → connection → server)
+  that highlights the first degraded edge; a stacked synced/pending/failed/not-
+  on-server bar built from the SAME `buildTreeSyncIndex` roll-up as the sidebar
+  dots (so the two can never disagree); a Needs-attention list mapping every
+  `syncFailures()` entry — too-large (permanent), transient upload failures,
+  registry failures, plan limits, left-behind files, unregistered notes, orphan
+  CRDT history — to a plain-language cause and per-row remedies (Retry, Open,
+  Reveal, Reset history, Delete, Upgrade, Reclaim); and vault analytics from a new
+  Rust `vault_stats` command (one walk under the tree's ignore rules + aggregate
+  SQLite queries: notes/folders/attachments/other files with bytes, tags, resolved
+  and broken links, index size, CRDT history size and orphans, the ten largest
+  notes and files, the ten heaviest histories, and a 12-week modified-notes
+  strip). New: `SyncManager.retryDoc(docId)` re-queues ONE note through the
+  external-writer path (forgets its permanent failure, `unmarkPushed`, forces a
+  connect) instead of re-pulling the whole registry; `syncFailures()` now carries
+  `permanent` and hides a superseded failure for a doc already back in the
+  local-change queue. Pure model in `lib/health/model.ts` (38 tests), Rust census
+  in `src-tauri/src/stats.rs` (9 tests). Not a team tab: local vaults get the
+  first three stages and every analytic.
+- **Health page, round two — the app points at it, and every failure explains
+  itself.** Entry points: a `SyncIssuesBanner` ("N notes didn't sync" → Open
+  Health / Dismiss, keyed on `failedRunToken` so a dismiss silences one run, not
+  the feature), the corner `SyncBadge` CTA becomes **See why** when a run ends in
+  `error` (`syncBadgeAction`), and `NotSyncingBanner` gains an Open Health
+  button; all open the dialog via a new store `requestSettings(tab)` request
+  consumed by `AccountMenu` (`SettingsTab` moved to `lib/settingsTabs.ts`).
+  Reasoning: every `HealthIssue` now carries `explanation` (meaning / what Baalda
+  does next / what you can do / where the content is), a `facts` table and
+  `autoRetries`; too-large tells a file over the cap from history over the cap
+  (joined against the census) and leads with Reset history for the latter; new
+  remedies `export-copy`, `copy-details`, `reregister`, `contact-owner`. New
+  `SyncManager.syncLog()`/`onSyncLog` (a 200-entry `SyncLog` ring buffer fed at
+  the existing status/progress/failure decision points via additive
+  `ContentUploader.onFailure` and `VaultRegistry.setFailureListener` hooks) and
+  `inspectDoc(docId)` behind a **Check a note** inspector whose verdict never
+  says "confirmed" without the durable `isPushed` checkpoint. **Fifteen
+  integrity checks** from a new Rust `vault_checks` command (`checks.rs`, one
+  shared `census_files` walk with `stats.rs`): empty / unreadable (non-UTF-8,
+  also scanning unindexed markdown) / broken-frontmatter / oversized notes,
+  stale index rows, unindexed markdown, case collisions, Windows-illegal names,
+  long paths, duplicate titles, broken links, missing embeds (resolved like the
+  app resolves them), heavy history, orphan history, and `.context/trash`; plus
+  `empty_trash` and `rebuild_index` commands. Definitions and copy live in
+  `lib/health/checks.ts`. UI split into `HealthIssues/Checks/Inspector/
+  Timeline/Stats`; the pipeline shows three cards (files on disk → connection →
+  remote vault) and reveals index/history only when they are degraded.
+- **Orphan history now means what Reclaim removes.** `vault_stats`/`vault_checks`
+  take the registry's `docId → path` map (`liveDocs`) and call a CRDT doc an
+  orphan only when NEITHER the local `notes` table nor the registry knows its
+  id — the same live set `crdtGc.ts` hands `prune_yjs_docs`. Server-pulled notes
+  carry a registry id the local table never assigned, so the page said "18
+  reclaimable" next to a Reclaim that freed nothing.
+- **Settings modal sized by the viewport** (`clamp(720px, 84vw, 1600px)` ×
+  `clamp(560px, 88vh, 1120px)`) instead of a fixed 1200×860 that read as a small
+  box on large displays.
+- **"Remember email address" on the sign-in dialog** (#120). A `Switch` under the
+  password field; when on, the address used at the last SUCCESSFUL sign-in
+  prefills the field next time (invitation address still outranks it). Only the
+  email is stored — `lib/rememberedEmail.ts`, two `localStorage` keys wrapped
+  in try/catch like the other prefs; turning the switch off removes both at
+  once, so unticking forgets immediately even if the dialog is then closed. The
+  switch opens on its last state.
+- **Mermaid diagrams.** A ```` ```mermaid ```` fence renders as a diagram in live
+  preview; the caret inside the block reveals the source, like every other block
+  widget (#132). `mermaid` 11.17 is loaded with one memoised dynamic `import()`
+  the first time a note contains a diagram — the entry chunk grew by 88 bytes;
+  the ~700 kB core plus one ~60 kB chunk per diagram type are fetched lazily and
+  deliberately kept out of `prefetch.ts`. It runs at `securityLevel: "strict"`
+  with `htmlLabels: false`, `suppressErrorRendering`, and the theme/CSS keys
+  locked against `%%{init}%%` directives; the output goes through a mermaid-only
+  scrubber (`editor/mermaid/sanitize.ts` — drops `script`/`iframe`/`on*`/
+  `javascript:`, keeps the `<style>` and `style=` that ARE the diagram, which
+  the note-HTML sanitizer would strip). Renders are validated with
+  `mermaid.parse` first, debounced 300 ms, LRU-cached by source, and a failed
+  render shows an inline error strip under the last good diagram instead of
+  throwing into the editor. The slash menu gained a "Diagram" block.
+  `fenceRenderKind` is now the single authority for which fences render
+  (`livePreview.ts` and `codeFence.ts`).
+- **A Coolify deploy path for self-hosters** (`deploy/coolify/`, contributed by
+  [@JotaSXBR](https://github.com/JotaSXBR), #135, closes #97). Coolify — and any
+  PaaS that runs `docker compose` with the REPO ROOT as the project directory —
+  resolves `deploy/compose/docker-compose.yml`'s `context: ../..` two levels
+  ABOVE the repo root, so the build fails before it starts. The new file is the
+  same `postgres → migrate → server` stack with `context: .` and no published
+  ports (Coolify's own Traefik terminates TLS and reaches the container on the
+  internal network), leaving `deploy/compose/` untouched for the VPS + nginx path.
+  `POSTGRES_PASSWORD` and `JWT_SECRET` come from Coolify's magic env vars, so a
+  first deploy needs nothing typed in. Three Coolify-specific traps are documented
+  in `deploy/coolify/README.md` because none of them are obvious from Coolify's
+  docs: its parser reads `${VAR:?text}` as a PREFILLED DEFAULT, not bash's error
+  message, so our guard clauses would have become literal garbage values; an unset
+  `${VAR}` arrives as an EMPTY STRING rather than an absent key, which
+  `config.ts`'s `required(name, fallback)` does not catch (`??` only fires on
+  undefined), so the default has to live in the compose interpolation; and a
+  since-fixed Coolify bug (v4.3.19) could corrupt a saved domain into a bare
+  `https://`. Verified end-to-end on a live instance, desktop sync included.
 - **`ready.revoked` — the server STATES a revocation on every connect.** The
   vault channel's `ready` frame gained `revoked` / `revokedTruncated`
   (`sync/vault-protocol.ts`), the third of its doc lists after `empty` and
@@ -677,6 +1010,44 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   the vault (switching vaults starts a fresh strip).
 
 ### Fixed
+- **The state-vector cache was seeded by a fire-and-forget write, and its test
+  raced it.** `loadDocDiff`'s slow path ended in `void rememberStateVector(...)`,
+  so the function RETURNED BEFORE the INSERT committed. `persistence.test.ts`'s
+  "caches a doc's state vector" does a cold read and then immediately a warm one
+  and asserts the warm read never touched the snapshot — which is only true if
+  the write won the race. It often did not: measured locally, the row was still
+  absent the instant the cold call returned **35 times out of 40**, and the
+  unmodified suite failed 3 runs in 8. That is the intermittent
+  `expected true to be false` at `persistence.test.ts:345` that reddened `main`
+  while the SAME commit passed on `staging`. Awaiting the write settles it (0 in
+  8). Nothing was ever wrong in production: the watermark guard means a late or
+  out-of-order write is either correct or correctly DISTRUSTED — a vector is
+  trusted only while `upto_update_id` still equals the log's `max(id)` — so no
+  client was served a stale vector. What the `void` did cost was real though:
+  the write escaped the pool's backpressure, so a big vault's first connect
+  fired a burst of unobserved INSERTs against the same connections `runPool`
+  was using for backfill reads.
+- **`doc_state_vectors` was never truncated between server tests.** It was
+  missing from `resetDb`'s table list while the table it describes,
+  `doc_updates`, is truncated WITH `RESTART IDENTITY` — so a row left by an
+  earlier test could carry a watermark that accidentally matched the next test's
+  rewound log, and `loadDocDiff` would then trust a vector belonging to a
+  different document. Not the cause of the flake above (adding it changed the
+  failure rate not at all), but a cache the code trusts has to be reset with the
+  log it describes.
+- **One daily checkpoint could drown out every other server log.**
+  `captureCheckpoint` walked a vault's notes and `console.warn`ed a line per
+  note it skipped, for two reasons that are both ORDINARY at scale: a note
+  whose CRDT has not reached the server yet (every freshly-synced client has
+  thousands) and a note over `MAX_CHECKPOINT_DOC_BYTES`. On a 4,445-note vault
+  in production that was thousands of lines from one routine housekeeping pass,
+  which pushed the service past the host's 500 logs/sec ceiling — and over that
+  ceiling messages are DROPPED, so a scheduled snapshot could cost us the logs
+  for whatever else happened in that second. The two cases are now counted, not
+  narrated: at most five ids apiece are sampled and the remainder summarised
+  (`a, b, c …+97 more`) in a single line per vault that also reports how many of
+  the vault's notes were captured. Knowing which individual note was skipped was
+  never worth the rest of the log.
 - **A note could double one block of its own text, geometrically, until it was
   megabytes of one paragraph.** `vaultDocStore.coldApply` opens a TRANSIENT
   bridge for a background note — a fresh `Y.Doc`, so a fresh clientID every

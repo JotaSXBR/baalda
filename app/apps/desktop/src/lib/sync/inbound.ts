@@ -547,7 +547,7 @@ export function planInbound(input: InboundInput): InboundPlan {
       }
       if (samePath(loc, prev)) {
         // The server moved it and we didn't. THE rename-duplicate fix.
-        pushRename(plan, docId, loc, srv);
+        pushRename(plan, docId, loc, srv, localPaths);
       } else if (samePath(srv, prev)) {
         // We moved it and the server didn't — outbound's job (`renamePath`), not
         // ours. Left alone rather than dragged back.
@@ -556,7 +556,7 @@ export function planInbound(input: InboundInput): InboundPlan {
         // Both moved, to different places. The vault feed is downstream-only
         // (spec 05), so the server wins. Non-destructive by construction: Rust
         // refuses a rename onto an existing file, so this can never overwrite.
-        pushRename(plan, docId, loc, srv);
+        pushRename(plan, docId, loc, srv, localPaths);
       }
       continue;
     }
@@ -628,10 +628,41 @@ export function planInbound(input: InboundInput): InboundPlan {
   return plan;
 }
 
-function pushRename(plan: InboundPlan, docId: string, from: string, to: string): void {
+function pushRename(
+  plan: InboundPlan,
+  docId: string,
+  from: string,
+  to: string,
+  localPaths: ReadonlySet<string>,
+): void {
   if (from === to) return;
   if (!isSafeNotePath(to)) {
     plan.rejected.push({ kind: "rename", path: to, docId, reason: "unsafe path from server" });
+    return;
+  }
+  // The destination is ANOTHER note on this disk. Rust refuses a rename onto an
+  // existing file, so planning this one buys nothing: it releases the doc (which
+  // tears down an open note's provider), throws, and records the identical
+  // failure — on every pass, forever (#129). Worse, the source file survives, so
+  // the vault is left with two files for one identity and the outbound half
+  // keeps re-registering the stale one.
+  //
+  // Refusing it here is the same verdict, reached without touching the disk, and
+  // it says something the user can act on: two files, one note. Resolving it
+  // needs a human — we cannot know which copy they want — so the plan states the
+  // conflict and stops.
+  //
+  // A TRANSIENT collision costs nothing: `input.local` is re-read from disk
+  // every pass, so a destination freed by another rename (two notes swapping
+  // places, the far half of a chain) is planned on the next one — exactly as it
+  // is today, where such a rename fails at the IPC boundary and is retried.
+  if (localPaths.has(to.toLowerCase())) {
+    plan.rejected.push({
+      kind: "rename",
+      path: to,
+      docId,
+      reason: `the server moved this note to ${to}, but another note already occupies that path — left at ${from}`,
+    });
     return;
   }
   plan.renames.push({ docId, from, to });

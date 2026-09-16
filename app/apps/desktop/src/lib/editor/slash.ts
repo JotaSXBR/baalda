@@ -57,6 +57,13 @@ const BLOCKS: Block[] = [
     caret: 4, // inside the fences (after "```\n")
   },
   {
+    label: "Diagram",
+    detail: "mermaid",
+    keywords: "mermaid flowchart chart graph sequence",
+    insert: "```mermaid\nflowchart TD\n  A[Start] --> B[Finish]\n```",
+    caret: 11, // on the first body line, just after "```mermaid\n"
+  },
+  {
     label: "Table",
     detail: "columns",
     keywords: "grid",

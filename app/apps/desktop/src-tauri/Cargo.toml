@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.1.59"
+version = "0.1.61"
 description = "Baalda — local-first markdown app"
 authors = ["Baalda"]
 license = "Apache-2.0"
@@ -39,9 +39,26 @@ once_cell = "1"
 # Move a deleted local-workspace folder to the OS trash (recoverable) rather than
 # hard-deleting it — the on-disk `.md` files are the only copy of a local vault.
 trash = "5"
-# OS keychain for session tokens (spec 04 §7). apple-native uses the macOS
-# Security framework; swap/add features for other platforms later.
-keyring = { version = "3", features = ["apple-native"] }
+# OS keychain for session tokens (spec 04 §7). keyring 3 has NO default store:
+# every platform's backend must be named as a feature or that platform silently
+# falls back to the in-memory `mock` store, so the session token dies with the
+# process and the app starts signed out on every launch (#136, #129).
+#   apple-native        → macOS Security framework / Keychain
+#   windows-native      → Windows Credential Manager
+#   sync-secret-service → Linux D-Bus Secret Service (gnome-keyring / KWallet),
+#     the only Linux store that survives a reboot — `linux-native` (kernel
+#     keyutils) is per-boot memory, so it is not a substitute.
+#   crypto-rust         → encrypt the Secret Service D-Bus session with pure
+#     Rust rather than plaintext or a system OpenSSL.
+# sync-secret-service links libdbus, so Linux CI installs libdbus-1-dev (both
+# release workflows) and Linux users need libdbus-1-3 — present on every desktop
+# install that has a Secret Service at all.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }
 tauri-plugin-deep-link = "2.4.9"
 
 # The updater is desktop-only — gate it so mobile targets don't try to build it.

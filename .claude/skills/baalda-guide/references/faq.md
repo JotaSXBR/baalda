@@ -88,8 +88,9 @@ plugins do not. See `file-formats.md` for what happens to non-Markdown files.
 ## Which platforms?
 macOS (Apple Silicon and Intel), Windows 10/11, Linux (AppImage, .deb, .rpm). iOS is planned,
 not available. The macOS build is signed and notarized; Windows and Linux builds are unsigned,
-so a fresh Windows download shows a SmartScreen warning (More info → Run anyway). The app
-updates itself with a signed updater after the first install.
+so a fresh Windows download shows a SmartScreen warning (More info → Run anyway). After the first
+install the app updates itself: it checks, downloads, installs and restarts at a quiet moment,
+verified with Baalda's own signing key, and then shows a short What's New for that version.
 
 ## How do I share notes with my team?
 Sign in, turn on sync for your vault, invite people by email or share a join code. New vaults

@@ -140,6 +140,7 @@ interface RigOptions {
   onAcquire?: (docId: string, store: VaultDocStore) => void;
   /** Wire the production `readFile` dep (the pre-network checks need it). */
   readFile?: boolean;
+  lazyPhase?: boolean;
 }
 
 function rig(opts: RigOptions) {
@@ -182,6 +183,7 @@ function rig(opts: RigOptions) {
     ingestFromFile: opts.ingestFromFile,
     mustConnect: opts.mustConnect,
     shouldStop: opts.shouldStop,
+    lazyPhase: opts.lazyPhase,
     progress: sink.sink,
     concurrency: opts.concurrency,
     failureStreakLimit: opts.failureStreakLimit,
@@ -670,6 +672,88 @@ describe("ContentUploader — local-change runs (force + ingestFromFile)", () =>
 
     expect(r.server.text("d1")).toBe("server truth"); // no doubling, no clobber
     expect(r.harness.fs.get("Note.md")).toBe("server truth");
+  });
+});
+
+describe("ContentUploader — lazyPhase (announce only when there is work)", () => {
+  it("leaves the phase and counters untouched for an echo-only run", async () => {
+    const notes = [{ docId: "d1", relPath: "Note.md" }];
+    const first = rig({ files: { "Note.md": "steady" }, notes });
+    await first.uploader.run();
+
+    const second = rig({
+      files: {},
+      notes,
+      harness: first.harness,
+      server: first.server,
+      pushed: new Set(["d1"]),
+      force: true,
+      ingestFromFile: true,
+      lazyPhase: true,
+    });
+    const result = await second.uploader.run();
+
+    expect(result).toMatchObject({ total: 1, pushed: 1, failed: 0 });
+    expect(second.connects).toEqual([]);
+    // Nothing was announced: no phase, no `queued` stamp, no item counted…
+    expect(second.sink.phases).toEqual([]);
+    expect(second.sink.stateOf("d1")).not.toContain("queued");
+    expect(second.sink.counts()).toEqual({ done: 0, failed: 0 });
+    // …but the note is still confirmed for the sidebar.
+    expect(second.sink.stateOf("d1")).toContain("synced");
+  });
+
+  it("announces `uploading` the moment a note needs the server, sized to what is left", async () => {
+    const notes = [
+      { docId: "quiet", relPath: "Quiet.md" },
+      { docId: "edited", relPath: "Edited.md" },
+    ];
+    const first = rig({ files: { "Quiet.md": "same", "Edited.md": "v1" }, notes });
+    await first.uploader.run();
+    first.harness.fs.externalWrite("Edited.md", "v1 changed outside");
+
+    const second = rig({
+      files: {},
+      notes,
+      harness: first.harness,
+      server: first.server,
+      pushed: new Set(["quiet", "edited"]),
+      force: true,
+      ingestFromFile: true,
+      lazyPhase: true,
+      concurrency: 1,
+    });
+    const result = await second.uploader.run();
+
+    expect(result).toMatchObject({ total: 2, pushed: 2, failed: 0 });
+    expect(second.connects).toEqual(["edited"]);
+    expect(second.sink.phases).toEqual(["uploading"]);
+    // One note settled quietly before the announcement, so the announced run
+    // had one item, and one item was done.
+    expect(second.sink.counts()).toEqual({ done: 1, failed: 0 });
+    expect(second.server.text("edited")).toBe("v1 changed outside");
+  });
+
+  it("announces before reporting a failure, so nothing is counted against a phase nobody saw", async () => {
+    const notes = [{ docId: "d1", relPath: "Note.md" }];
+    const first = rig({ files: { "Note.md": "v1" }, notes });
+    await first.uploader.run();
+    first.harness.fs.externalWrite("Note.md", "v2");
+    const second = rig({
+      files: {},
+      notes,
+      harness: first.harness,
+      server: first.server,
+      pushed: new Set(["d1"]),
+      force: true,
+      ingestFromFile: true,
+      lazyPhase: true,
+      behaviour: { neverFlushed: new Set(["d1"]) },
+    });
+    const result = await second.uploader.run();
+    expect(result.failed).toBe(1);
+    expect(second.sink.phases).toEqual(["uploading"]);
+    expect(second.sink.counts()).toEqual({ done: 1, failed: 1 });
   });
 });
 

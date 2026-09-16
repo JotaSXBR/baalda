@@ -62,13 +62,13 @@ import {
 } from "./lib/prefs";
 import type { PropertiesMode } from "./lib/editor/frontmatter";
 import type { TreeSort } from "./lib/tree/sort";
+import type { SettingsTab } from "./lib/settingsTabs";
 import { seedWelcomeContent, vaultIsEmpty, WELCOME_NOTE_PATH } from "./lib/vault/seed";
 import { planLanding } from "./lib/vault/landing";
 import { planTurnOnSync } from "./lib/vault/turnOnSync";
 import { planOpen } from "./lib/sync/openGate";
 import { rediscoverVaultFolder } from "./lib/vault/rediscover";
 import { playJoinChime } from "./lib/celebrate/celebrate";
-import { viewingDocId } from "./lib/presence/viewingDocId";
 import { dismissToast, toast } from "./lib/toast";
 import { parseNoteLink } from "./lib/shareLink";
 import { parseInviteDeepLink } from "./lib/inviteLink";
@@ -292,6 +292,16 @@ interface AppStore {
    */
   syncProgress: SyncProgress | null;
   /**
+   * Identity of the most recent bulk run that ENDED in failure — bumped once per
+   * fresh transition into the `error` phase, never while a run is moving.
+   *
+   * What makes the sync-issues banner dismissible per failure rather than per
+   * app launch: the banner remembers the token it was dismissed for, so the next
+   * failing run is a different number and raises it again. Vault-scoped like
+   * `syncProgress` (a failure in the vault you left is not news here).
+   */
+  failedRunToken: number;
+  /**
    * Per-doc sync state for the sidebar badge, keyed by **docId, never by path**
    * (paths change on rename and collide across vaults). Dropped on every vault
    * switch alongside `syncProgress`.
@@ -461,6 +471,16 @@ interface AppStore {
   revealRequest: { path: string; edit: boolean; token: number } | null;
   requestReveal: (path: string, opts?: { edit?: boolean }) => void;
   /**
+   * "Open Vault Settings on this page." Set by anything that wants to hand the
+   * user off to a settings tab — the sync banner and the sync pill both point at
+   * Health — and consumed by an effect in `AccountMenu`, which is the only place
+   * that owns the settings dialog. `token` makes a repeat request for the SAME
+   * tab re-fire, exactly like `revealRequest`: opening settings is an event, not
+   * a state.
+   */
+  settingsRequest: { tab: SettingsTab; token: number } | null;
+  requestSettings: (tab: SettingsTab) => void;
+  /**
    * "The next time this note's editor mounts, put the cursor in its inline
    * title." Set by `createNoteIn`, consumed once by `InlineTitle` on mount.
    *
@@ -514,6 +534,15 @@ interface AppStore {
   signInWithGoogle: () => Promise<void>;
   signUp: (name: string, email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  /**
+   * The server has told us our session is gone, mid-run — a 30-day session that
+   * lapsed while the app stayed open, or a revocation from another device. Not a
+   * user action, so it is deliberately NOT `signOut`: the vault stays open, the
+   * editor keeps working, and the #145 banner explains that edits are staying on
+   * this device. Called by the sync layer's session guard, which has already
+   * re-checked the session with the server.
+   */
+  handleSessionExpired: () => void;
   /**
    * Run the post-sign-in landing on demand, for a flow that deliberately
    * suppressed it and then fell through (abandoning "join a team" after the
@@ -1334,6 +1363,7 @@ function vaultScopedSyncReset() {
     syncStatus: "offline" as SyncStatus,
     syncPending: false,
     syncProgress: null,
+    failedRunToken: 0,
     docSyncState: {} as Record<string, DocSyncState>,
     docIdByPath: {} as Record<string, string>,
     locks: [] as Share[],
@@ -1362,6 +1392,7 @@ export const useStore = create<AppStore>((set, get) => ({
   noteRemovedSynced: false,
   noteRemovedByTeammate: null,
   revealRequest: null,
+  settingsRequest: null,
   revealedPath: null,
   backlinks: [],
   titles: [],
@@ -1771,11 +1802,12 @@ export const useStore = create<AppStore>((set, get) => ({
       // alternative is threading a flag through all of this action's callers.
       get().requestReveal(path);
       // Tell teammates which note we're now viewing (drives their sidebar dots).
-      // The announced id must be the SERVER doc_id — see `viewingDocId`, which
-      // exists to hold that reasoning and a regression test for it.
-      syncManager.setViewing(
-        viewingDocId(meta?.id, syncManager.registry.getMapping(path)?.docId),
-      );
+      // The announced id must be the SERVER doc_id — see `viewingDocId`. We hand
+      // over the PATH rather than a resolved id: opening a note while the
+      // post-join reconcile is still running finds no mapping yet, and a value
+      // resolved here would be replayed, unchanged, for the whole session (#125).
+      // The sync layer re-resolves on every announce and again when the map moves.
+      syncManager.setViewing(path, meta?.id ?? null);
       await get().refreshBacklinks();
     } finally {
       // Only the newest open clears it: two quick clicks would otherwise have the
@@ -1813,6 +1845,12 @@ export const useStore = create<AppStore>((set, get) => ({
         edit: opts?.edit ?? false,
         token: (s.revealRequest?.token ?? 0) + 1,
       },
+    }));
+  },
+
+  requestSettings: (tab) => {
+    set((s) => ({
+      settingsRequest: { tab, token: (s.settingsRequest?.token ?? 0) + 1 },
     }));
   },
 
@@ -2125,6 +2163,11 @@ export const useStore = create<AppStore>((set, get) => ({
 
   initAuth: async () => {
     syncManager.setStatusListener((status) => get().setSyncStatus(status));
+    // The server refused our session at token mint and a fresh session check
+    // agreed it is gone (`sync/sessionGuard.ts`). Fires at most once per
+    // session — this is what makes an expiry mid-run visible NOW instead of at
+    // the next launch (#145).
+    syncManager.setSessionRejectedListener(() => get().handleSessionExpired());
     syncManager.setActivityListeners({
       onPending: (pending) => get().setSyncPending(pending),
       onFlushed: () => get().markSynced(),
@@ -2417,6 +2460,29 @@ export const useStore = create<AppStore>((set, get) => ({
     void ipc.clearLastVault().catch(() => {
   /* best-effort — worst case the next launch reopens the vault */
 });
+  },
+
+  handleSessionExpired: () => {
+    // Nothing to drop: already signed out, or a sign-out landed first.
+    if (get().authStatus !== "signed-in" && !get().session) return;
+    // This flow owns the session from here: a detached `initAuth` still
+    // restoring the previous one must not land it back on top of ours.
+    ++authInitGen;
+    // Stop minting. Every provider (the open note's, the uploader's, the vault
+    // channel's) would otherwise keep retrying a token the server will refuse
+    // for as long as the app stays open — the loop guard the guard's own latch
+    // cannot supply, because it only silences the REPORT.
+    leaveVaultSync();
+    console.warn("[auth] server refused the session — signing out locally");
+    // Exactly the fields `initAuth`'s signed-out branch sets, plus the sync flag
+    // `leaveVaultSync` just made false in fact. Emphatically NOT
+    // `vaultScopedSyncReset()` and not `signOut`'s list: those close the vault
+    // and clear `openFolderIsSynced`, which is the very input the banner needs
+    // to say "this synced vault is not syncing". The user keeps their notes on
+    // screen and signs back in from the banner.
+    set({ session: null, authStatus: "signed-out", syncEnabled: false });
+    // No note will ever get a provider now, so nothing may wait on one.
+    resolveSyncGate();
   },
 
   landAfterAuth: async () => {
@@ -3644,6 +3710,13 @@ export const useStore = create<AppStore>((set, get) => ({
       console.info(
         `[sync] badge progress ${prev?.phase ?? "null"} → ${progress?.phase ?? "null"} ${JSON.stringify(progress ?? null).slice(0, 160)}`,
       );
+    }
+    // A FRESH arrival at `error` is a new failed run, and the only thing that
+    // may un-dismiss the sync-issues banner. Later emissions of the same phase
+    // (the reporter re-flushes while failures trickle in) must not, or a
+    // dismissed banner would pop back up as the counter moved.
+    if (prev?.phase !== "error" && progress?.phase === "error") {
+      set((s) => ({ failedRunToken: s.failedRunToken + 1 }));
     }
     return set({ syncProgress: progress });
   },

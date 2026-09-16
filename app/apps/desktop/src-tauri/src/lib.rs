@@ -3,6 +3,7 @@
 //! registered here and reacts to `files-changed` / `vault-opened` events.
 
 pub mod attachments;
+pub mod checks;
 mod commands;
 mod error;
 pub mod import_export;
@@ -12,6 +13,7 @@ pub mod notefile;
 pub mod oauth;
 pub mod parse;
 mod state;
+pub mod stats;
 pub mod tree;
 pub mod vault;
 mod watcher;
@@ -20,6 +22,40 @@ use state::AppState;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Open the main window at a size that suits the screen it lands on: about
+/// 79% × 88% of the monitor's work area, centered, never smaller than the
+/// 1200×800 in `tauri.conf.json` unless the screen itself is, and capped so a
+/// 5K display does not get a 4,000-pixel-wide editor. The config's fixed
+/// 1200×800 was right for a laptop and opened as a small box in the middle of
+/// a 27" display. Logical pixels throughout, so Retina scaling is handled.
+#[cfg(desktop)]
+fn fit_window_to_screen(win: &tauri::WebviewWindow) {
+    let monitor = match win.current_monitor() {
+        Ok(Some(m)) => Some(m),
+        _ => win.primary_monitor().ok().flatten(),
+    };
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    if scale <= 0.0 {
+        return;
+    }
+    let area = monitor.work_area();
+    let avail_w = area.size.width as f64 / scale;
+    let avail_h = area.size.height as f64 / scale;
+    let floor_w = 1200.0_f64.min(avail_w);
+    let floor_h = 800.0_f64.min(avail_h);
+    let w = (avail_w * 0.79).clamp(floor_w, 2000.0_f64.max(floor_w));
+    let h = (avail_h * 0.88).clamp(floor_h, 1400.0_f64.max(floor_h));
+    if let Err(e) = win.set_size(tauri::LogicalSize::new(w, h)) {
+        log::warn!("[window] could not size the window to the screen: {e}");
+        return;
+    }
+    let _ = win.center();
+    log::info!("[window] sized to {w:.0}×{h:.0} on a {avail_w:.0}×{avail_h:.0} work area");
+}
+
 pub fn run() {
     let builder = tauri::Builder::default();
 
@@ -32,20 +68,57 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}));
 
-    // The UI's own log, on the dev terminal. A `console.log` inside a WKWebView
-    // goes to the Web Inspector and nowhere else, so anything the React layer
-    // measures about itself is invisible to whoever is reading `tauri dev` —
-    // which is how two wrong diagnoses of "the sidebar blinks while it syncs"
-    // survived as long as they did. The frontend's `@tauri-apps/plugin-log`
-    // calls land on stdout next to the Rust ones, so both halves of a symptom
-    // read as one timeline. Debug builds only; a shipped app logs nothing new.
+    // The UI's own log. A `console.log` inside a WKWebView goes to the Web
+    // Inspector and nowhere else, so anything the React layer measures about
+    // itself is invisible to whoever is reading `tauri dev` — which is how two
+    // wrong diagnoses of "the sidebar blinks while it syncs" survived as long as
+    // they did. The frontend's `@tauri-apps/plugin-log` calls land next to the
+    // Rust ones, so both halves of a symptom read as one timeline.
+    //
+    // Note `targets()`, not `target()`: the latter APPENDS to the plugin's
+    // defaults (Stdout + LogDir), so the old `.target(Stdout)` here was really
+    // "stdout twice, plus a file" rather than the stdout-only it reads as.
+    //
+    // Debug: the terminal, which is where a developer already is.
     #[cfg(debug_assertions)]
     let builder = builder.plugin(
         tauri_plugin_log::Builder::new()
             .level(log::LevelFilter::Info)
-            .target(tauri_plugin_log::Target::new(
+            .targets([tauri_plugin_log::Target::new(
                 tauri_plugin_log::TargetKind::Stdout,
-            ))
+            )])
+            .build(),
+    );
+
+    // Release: a rotating FILE, because a shipped app's stdout goes nowhere —
+    // on Windows there is no console attached at all. Without it, a user whose
+    // vault refused to open (#128) had nothing to send us but a screenshot of
+    // the dialog, and the errors that matter most are the ones that happen on
+    // machines we cannot reproduce.
+    //
+    //   macOS   ~/Library/Logs/com.baalda.context/baalda.log
+    //   Windows %LOCALAPPDATA%\com.baalda.context\logs\baalda.log
+    //   Linux   ~/.local/share/com.baalda.context/logs/baalda.log
+    //
+    // Bounded on purpose: 2 MB per file, KeepOne (the rotated file replaces the
+    // previous one), so the app can never cost more than ~4 MB of disk here. At
+    // `Info` this is app lifecycle plus every warn/error — including the
+    // `io_ctx` failures from error.rs, which log themselves on the way to the
+    // UI, so a failed open is in the file whether or not the user reports it.
+    #[cfg(not(debug_assertions))]
+    let builder = builder.plugin(
+        tauri_plugin_log::Builder::new()
+            .level(log::LevelFilter::Info)
+            .max_file_size(2_000_000)
+            .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+            .targets([
+                // Kept so `open -a Baalda` / a terminal launch still shows the
+                // same lines live; it is a no-op where nothing is attached.
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                    file_name: Some("baalda".into()),
+                }),
+            ])
             .build(),
     );
 
@@ -85,6 +158,9 @@ pub fn run() {
             // visible window is a no-op, so this needs no coordination.
             #[cfg(desktop)]
             if let Some(win) = app.get_webview_window("main") {
+                // While it is still hidden, so the first frame is already the
+                // right size — resizing after reveal would visibly jump.
+                fit_window_to_screen(&win);
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(1500));
                     if win.is_visible().unwrap_or(false) {
@@ -143,6 +219,10 @@ pub fn run() {
             commands::read_binary_file,
             commands::write_binary_file,
             commands::list_attachments,
+            commands::vault_stats,
+            commands::vault_checks,
+            commands::empty_trash,
+            commands::rebuild_index,
             commands::read_external_file,
             commands::get_server_url,
             commands::set_server_url,

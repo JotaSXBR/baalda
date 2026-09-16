@@ -303,9 +303,13 @@ jobs:
           fi
           echo "::add-mask::$STAGING_SERVER_URL"
 
-      # Tauri v2's documented Ubuntu prerequisite set, plus patchelf (AppImage).
+      # Tauri v2's documented Ubuntu prerequisite set, plus patchelf (AppImage)
+      # and libdbus-1-dev.
       # webkit2gtk **4.1** and **ayatana**-appindicator: the 4.0 / plain
       # libappindicator3-dev packages are Tauri v1's and do not link here.
+      # libdbus-1-dev is the build header for keyring's `sync-secret-service`
+      # backend — without it there is no Linux credential store and the session
+      # token dies with the process (#136/#129).
       - name: Install Linux build dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -316,6 +320,7 @@ jobs:
             librsvg2-dev \
             libxdo-dev \
             libssl-dev \
+            libdbus-1-dev \
             build-essential \
             curl wget file patchelf
 
@@ -461,6 +466,39 @@ jobs:
           Windows here is the `-setup.exe` (NSIS) only; an MSI cannot carry a
           prerelease version.
           NOTES
+
+          # Below the warning, what this build actually changes. docs/RELEASE_NOTES.md
+          # is per-version (`## <version>` sections, newest first); staging always
+          # wants the TOPMOST one, because the version bump happens at promotion —
+          # the base version here still names the release that already shipped.
+          # Missing file or empty section: the warning above stands on its own.
+          if [ -f docs/RELEASE_NOTES.md ]; then
+            heading=$(awk '
+              incomment { if (index($0, "-->")) incomment = 0; next }
+              index($0, "<!--") { if (!index($0, "-->")) incomment = 1; next }
+              /^##[ \t]/ { sub(/^##[ \t]+/, ""); print; exit }
+            ' docs/RELEASE_NOTES.md)
+            section=$(awk '
+              function emit(arr, n,   i, a, b) {
+                a = 1; while (a <= n && arr[a] ~ /^[ \t]*$/) a++
+                b = n; while (b >= a && arr[b] ~ /^[ \t]*$/) b--
+                for (i = a; i <= b; i++) print arr[i]
+              }
+              incomment { if (index($0, "-->")) incomment = 0; next }
+              index($0, "<!--") { if (!index($0, "-->")) incomment = 1; next }
+              /^##[ \t]/ { nsec++; cur = (nsec == 1); next }
+              cur { first[++nfirst] = $0 }
+              END { emit(first, nfirst) }
+            ' docs/RELEASE_NOTES.md)
+            if [ -n "$section" ]; then
+              {
+                echo
+                echo "### What this build changes${heading:+ (queued for v$heading)}"
+                echo
+                echo "$section"
+              } >> "$RUNNER_TEMP/staging-notes.md"
+            fi
+          fi
 
           {
             echo 'body<<RELNOTES_EOF'

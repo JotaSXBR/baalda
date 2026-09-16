@@ -178,6 +178,30 @@ export interface ContentUploaderOptions {
    *  does not mean "nothing to send" — connect and flush regardless. */
   mustConnect?: (docId: string) => boolean;
   progress?: SyncProgressSink;
+  /**
+   * Called once per doc that could not be pushed, as it happens.
+   *
+   * {@link ContentUploader.failedDocs} already answers this at the END of a run,
+   * which is too late for a timeline: a run that is paused by the failure streak
+   * — or abandoned by a vault switch — never reports, and the user is left with
+   * a pill that says "not synced" and nothing that says why. Purely additive:
+   * the failure is recorded exactly as before whether or not anyone listens.
+   */
+  onFailure?: (failure: UploadFailure) => void;
+  /**
+   * Announce the run only when a note actually needs the network.
+   *
+   * For a local-change run the queue is a guess: the watcher saw a file change,
+   * but most such changes are this app's own background egest echoing back,
+   * which the ingest fast-path settles without a socket. Announcing "uploading
+   * 0/1" before that check made the corner pill flash "Syncing" on every note
+   * switch while nothing moved. With this set, the phase flips to `uploading`
+   * (with the notes still ahead as its total) the first time a note has to
+   * connect or fails, and a run that settles every note quietly leaves the
+   * phase — and the per-doc `queued` stamps — untouched. "Syncing" then means
+   * bytes are moving.
+   */
+  lazyPhase?: boolean;
   /** Abandon the run (vault switch). Checked before every doc. */
   shouldStop?: () => boolean;
   concurrency?: number;
@@ -225,6 +249,11 @@ export class ContentUploader {
   private streak = 0;
   private failures: UploadFailure[] = [];
   private running = false;
+  /** `lazyPhase` bookkeeping: has the phase been announced yet, and how many
+   *  notes settled quietly before it was (they are not part of its total). */
+  private announced = false;
+  private quietSkips = 0;
+  private queueLength = 0;
 
   constructor(opts: ContentUploaderOptions) {
     this.opts = opts;
@@ -286,8 +315,13 @@ export class ContentUploader {
           this.progress.doc(n.docId, "synced");
         }
       }
-      this.progress.phase("uploading", queue.length);
-      for (const n of queue) this.progress.doc(n.docId, "queued");
+      this.queueLength = queue.length;
+      this.quietSkips = 0;
+      this.announced = !this.opts.lazyPhase;
+      if (this.announced) {
+        this.progress.phase("uploading", queue.length);
+        for (const n of queue) this.progress.doc(n.docId, "queued");
+      }
       this.progress.flush();
       if (queue.length === 0) {
         return { total: 0, pushed: 0, failed: 0, aborted: false, cancelled: false };
@@ -426,7 +460,7 @@ export class ContentUploader {
           this.streak = 0;
           this.opts.markPushed(docId);
           this.progress.doc(docId, "synced");
-          this.progress.item("ok");
+          this.quietOk();
           return true;
         }
       }
@@ -449,11 +483,14 @@ export class ContentUploader {
         await this.releaseQuietly(docId);
         this.streak = 0;
         this.progress.doc(docId, "synced");
-        this.progress.item("ok");
+        this.quietOk();
         return true;
       }
     }
 
+    // From here on the network is involved: this is the moment a lazy run
+    // becomes visible.
+    this.announce();
     const push = this.opts.deps.connect({ docId, vaultId: this.opts.vaultId, doc: bridge.doc });
     try {
       // PULL FIRST. This is the split-brain rule (spec 03 §5): the server's state
@@ -530,13 +567,46 @@ export class ContentUploader {
     }
   }
 
+  /** Flip a lazy run to `uploading` (once), sized to the notes not yet settled. */
+  private announce(): void {
+    if (this.announced) return;
+    this.announced = true;
+    this.progress.phase("uploading", Math.max(0, this.queueLength - this.quietSkips));
+    this.progress.flush();
+  }
+
+  /** A note settled without the network. Before the announcement it is not
+   *  work anyone was told about, so it must not bump the previous phase's
+   *  counters; after it, it is one more item done. */
+  private quietOk(): void {
+    if (!this.announced) {
+      this.quietSkips++;
+      return;
+    }
+    this.progress.item("ok");
+  }
+
   private fail(
     docId: string,
     relPath: string,
     reason: string,
     opts: { permanent?: boolean } = {},
   ): void {
-    this.failures.push({ docId, relPath, reason, ...(opts.permanent ? { permanent: true } : {}) });
+    // A failure is always news, so a lazy run announces itself before reporting it.
+    this.announce();
+    const failure: UploadFailure = {
+      docId,
+      relPath,
+      reason,
+      ...(opts.permanent ? { permanent: true } : {}),
+    };
+    this.failures.push(failure);
+    // A listener must never be able to change what the run does next.
+    try {
+      this.opts.onFailure?.(failure);
+    } catch (e) {
+      console.warn("[upload] failure listener threw", e);
+    }
     this.progress.doc(docId, "error");
     this.progress.item("failed");
     // A permanent failure says nothing about the server's health, so it must

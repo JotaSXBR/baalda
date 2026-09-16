@@ -180,8 +180,15 @@ export type EditorMeasure = number | "full";
 
 /** 88ch is the readable measure: past roughly ninety characters the eye loses
  *  the start of the next line, which is where every typographic rule of thumb
- *  (and Obsidian's own default) lands. */
+ *  (and Obsidian's own default) lands. It is what a corrupted numeric value
+ *  falls back to and what a device that had the old "Readable line length"
+ *  switch ON keeps; a device that has never chosen starts at FULL width
+ *  (`EDITOR_MEASURE_UNSET`) — a centred 88ch column in a window sized to the
+ *  screen read as wasted space, and the people who want the narrow column
+ *  know where the slider is. */
 export const EDITOR_MEASURE_DEFAULT = 88;
+/** What a device with no stored choice gets. */
+export const EDITOR_MEASURE_UNSET: EditorMeasure = "full";
 /** Below ~60ch prose starts to hyphenate badly; above ~120ch the measure has
  *  already stopped being readable and "full" is the honest choice. */
 export const EDITOR_MEASURE_MIN = 60;
@@ -215,17 +222,24 @@ export function readEditorMeasure(): EditorMeasure {
   try {
     const raw = localStorage.getItem(EDITOR_MEASURE_KEY);
     if (raw === null) {
-      return localStorage.getItem(LEGACY_READABLE_LINE_LENGTH_KEY) === "off"
-        ? "full"
-        : EDITOR_MEASURE_DEFAULT;
+      // The old two-state switch, if this device still has it: "off" was full
+      // width, anything else was the readable column. A device that has never
+      // had either key gets the unset default.
+      const legacy = localStorage.getItem(LEGACY_READABLE_LINE_LENGTH_KEY);
+      if (legacy === null) return EDITOR_MEASURE_UNSET;
+      return legacy === "off" ? "full" : EDITOR_MEASURE_DEFAULT;
     }
     if (raw === "full") return "full";
     // `Number("")` is 0 — finite, so it would survive the clamp as the MINIMUM
     // measure. An empty or blank value is a corrupted write, not a request for
     // the narrowest column.
-    return raw.trim() === "" ? EDITOR_MEASURE_DEFAULT : clampEditorMeasure(Number(raw));
+    const n = raw.trim() === "" ? Number.NaN : Number(raw);
+    // Not a number at all (a corrupted write) is no choice, so it gets the same
+    // unset default as an absent key — not the readable stop the clamp uses for
+    // a garbage slider reading.
+    return Number.isNaN(n) ? EDITOR_MEASURE_UNSET : clampEditorMeasure(n);
   } catch {
-    return EDITOR_MEASURE_DEFAULT;
+    return EDITOR_MEASURE_UNSET;
   }
 }
 

@@ -44,6 +44,7 @@ const fakeRegistry = vi.hoisted(() => {
     setNoteMetaListener: vi.fn(),
     // …and the vault's shared item colors, from that same pull.
     setColorListener: vi.fn(),
+    setFailureListener: vi.fn(),
     // Inbound reconciliation: the manager hands itself over as the host that can
     // make the editor/doc-store let go of a doc before its file moves.
     inboundHost: null as unknown,

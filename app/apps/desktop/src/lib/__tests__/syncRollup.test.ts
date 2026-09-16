@@ -4,6 +4,7 @@ import {
   FolderWaveTracker,
   folderSyncTitle,
   rowSyncMark,
+  sidebarMarksVisible,
   type TreeSyncIndex,
 } from "../syncRollup";
 import type { DocSyncState } from "../sync/vaultScope";
@@ -315,5 +316,21 @@ describe("folderSyncTitle", () => {
     expect(folderSyncTitle(indexOf({ "A/a.md": "synced" }).folders.get("A")!)).toBe(
       "All 1 note synced",
     );
+  });
+});
+
+describe("sidebarMarksVisible", () => {
+  it("hides every mark until the server has answered this session", () => {
+    expect(sidebarMarksVisible("offline")).toBe(false);
+    expect(sidebarMarksVisible("connecting")).toBe(false);
+    expect(sidebarMarksVisible("error")).toBe(false);
+    expect(sidebarMarksVisible("no-access")).toBe(false);
+  });
+
+  it("shows them once the server has spoken, even to say view-only or too large", () => {
+    expect(sidebarMarksVisible("synced")).toBe(true);
+    expect(sidebarMarksVisible("read-only")).toBe(true);
+    expect(sidebarMarksVisible("deleted")).toBe(true);
+    expect(sidebarMarksVisible("too-large")).toBe(true);
   });
 });

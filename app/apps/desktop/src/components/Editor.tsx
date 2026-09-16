@@ -10,6 +10,7 @@ import { createEditorState, lineNumberExtension } from "../lib/editor";
 import { foldEffectsFor, parseNoteUiState, persistFolds } from "../lib/editor/folding";
 import { propertiesMode as propertiesModeFacet } from "../lib/editor/frontmatter";
 import { loadTypes } from "../lib/frontmatter/types";
+import { dispatchAfterCommit } from "../lib/editor/effectDispatch";
 import { setActiveNote } from "../lib/editor/activeView";
 import { bindActiveNote } from "../lib/editor/activeNoteBinding";
 import { saveAttachment } from "../lib/attachments";
@@ -328,6 +329,14 @@ export function Editor() {
   const viewRef = useRef<EditorView | null>(null);
 
   const openNote = useStore((s) => s.openNote);
+  // The note the user has CLICKED, which is not yet the open one. `openNoteByPath`
+  // registers the note server-side before it sets `openNote`, and that is a
+  // network round trip — ~0ms against a local server, hundreds against the
+  // managed one. Until this was read here, the editor column ignored the whole
+  // window: the click painted nothing, the previous note just sat there, and the
+  // loading skeleton only appeared for the (fast, local) half that came after.
+  // That is why the loader looked broken in production and fine in dev.
+  const openingNotePath = useStore((s) => s.openingNotePath);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locks = useStore((s) => s.locks);
   const lifts = useStore((s) => s.lifts);
@@ -675,6 +684,17 @@ export function Editor() {
   // token on reconnect and the status flips to "read-only" here — no reopen
   // needed. Also refresh the lock list so the tree badge appears for us too.
   useEffect(() => {
+    // Only the OPEN note's grant is being reported here, and between one note's
+    // teardown and the next note's `openDoc` there is no open note at all:
+    // `syncManager.closeCurrent()` nulls its own status and re-emits, so the
+    // badge falls back to the VAULT CHANNEL's — normally "synced". Acting on
+    // that phantom "synced" set `hadEditAccessRef` on a note that never had
+    // edit access (killing the pre-verdict rollback below for the rest of the
+    // session) and flipped `readOnly` false, which is the reconfigure storm the
+    // locked→locked switch used to crash on. The bridge ref is the liveness
+    // signal: the cleanup clears it before `closeCurrent`, and the open path
+    // sets it before any status can arrive.
+    if (!bridgeRef.current) return;
     if (syncStatus === "read-only" || syncStatus === "no-access") {
       setReadOnly(true);
       if (syncStatus === "read-only") void useStore.getState().refreshLocks();
@@ -696,13 +716,18 @@ export function Editor() {
   }, [syncStatus]);
 
   // Push the Properties display mode into the live view when it changes.
+  // Every reconfigure below goes through `dispatchAfterCommit`: a synchronous
+  // `view.dispatch` from a passive effect can be re-entered inside a CodeMirror
+  // update (see `lib/editor/effectDispatch.ts`) and throws.
   useEffect(() => {
     const view = viewRef.current;
     const compartment = propsModeRef.current;
     if (!view || !compartment) return;
-    view.dispatch({
-      effects: compartment.reconfigure(propertiesModeFacet.of(propertiesMode)),
-    });
+    return dispatchAfterCommit(
+      view,
+      { effects: compartment.reconfigure(propertiesModeFacet.of(propertiesMode)) },
+      { isLive: () => viewRef.current === view },
+    );
   }, [propertiesMode]);
 
   // Push the line-number gutter setting into the live view.
@@ -710,7 +735,11 @@ export function Editor() {
     const view = viewRef.current;
     const compartment = lineNumbersRef.current;
     if (!view || !compartment) return;
-    view.dispatch({ effects: compartment.reconfigure(lineNumberExtension(lineNumbers)) });
+    return dispatchAfterCommit(
+      view,
+      { effects: compartment.reconfigure(lineNumberExtension(lineNumbers)) },
+      { isLive: () => viewRef.current === view },
+    );
   }, [lineNumbers]);
 
   // Push the current read-only state into the live CodeMirror view.
@@ -718,8 +747,16 @@ export function Editor() {
     const view = viewRef.current;
     const editable = editableRef.current;
     if (!view || !editable) return;
-    view.dispatch({ effects: editable.reconfigure(editableExtensions(readOnly)) });
-    if (!readOnly) view.focus();
+    return dispatchAfterCommit(
+      view,
+      { effects: editable.reconfigure(editableExtensions(readOnly)) },
+      {
+        isLive: () => viewRef.current === view,
+        then: (v) => {
+          if (!readOnly) v.focus();
+        },
+      },
+    );
   }, [readOnly]);
 
   // Hover preview of a past version: a SECOND, throwaway CodeMirror over the
@@ -774,6 +811,9 @@ export function Editor() {
   };
 
   const showToolbar = peers.length > 0;
+  // A different note is on its way in. Reopening the SAME path (a tab click) is
+  // not "opening another" — `!viewMounted` already covers that one.
+  const isOpeningAnother = openingNotePath != null && openingNotePath !== notePath;
   // "from 2h ago" for the pill. The panel holds the metadata; the preview state
   // carries only the id + text, so look the timestamp back up here.
   const previewedAt =
@@ -874,7 +914,15 @@ export function Editor() {
           </div>
         )}
       </div>
-      {!viewMounted && <EditorSkeleton immediate={switchingNoteRef.current} />}
+      {/* One continuous loading state, from the click to the first painted line.
+          `openingNotePath` covers the registration round trip (the old note is
+          still on screen, so the bars fade in over it); `!viewMounted` covers
+          the bridge open and the CodeMirror build that follow. Both render the
+          same element in the same place, so the swap is one animation rather
+          than the old note → bare pane → bars → text flicker. */}
+      {(!viewMounted || isOpeningAnother) && (
+        <EditorSkeleton immediate={switchingNoteRef.current} />
+      )}
     </div>
   );
 }

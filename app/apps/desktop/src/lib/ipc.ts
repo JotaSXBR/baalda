@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { decodeStateVectors, decodeYjsState, frame, type YjsState } from "./ipcCodec";
+import type { VaultChecks, VaultStats } from "./health/types";
 
 // The binary commands (CRDT state, attachment bytes) speak raw bytes, framed by
 // `ipcCodec.ts` — see that module for why and for the frame layouts.
@@ -545,6 +546,69 @@ export const writeBinaryFile = (
 
 export const listAttachments = (expectedEpoch?: VaultEpoch) =>
   invoke<AttachmentMeta[]>("list_attachments", { expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * A one-shot census of the open vault for Vault Settings → Health: counts and
+ * bytes for notes/folders/attachments/other files, the biggest of each, the
+ * local CRDT store (orphan docs included), tag + link totals, the index file's
+ * own size, and a 12-week strip of how many notes were modified.
+ *
+ * Computed by Rust in ONE disk walk (the tree's ignore rules — `.context/`,
+ * `.git`, dotfiles) plus a few aggregate queries, reading no file contents, so
+ * it is cheap enough to recompute on demand. Never cache it across vaults: every
+ * number in it describes the vault that was open when it was taken.
+ *
+ * A file counts as a *note* exactly when the index has a `notes` row for its
+ * path; `mtime` values are milliseconds since the epoch.
+ *
+ * `liveDocs` is the registry's `docId → relPath` map. A history doc is an
+ * ORPHAN only when neither the local `notes` table nor this map knows its id —
+ * the same live set `pruneYjsDocs` is given — so "N reclaimable" and what
+ * Reclaim actually removes can never disagree.
+ */
+export const vaultStats = (
+  liveDocs: Record<string, string>,
+  expectedEpoch?: VaultEpoch,
+  /** The caller's local midnight (ms), so `activity.days` is cut on calendar days. */
+  todayStartMs?: number,
+) =>
+  invoke<VaultStats>("vault_stats", {
+    liveDocs,
+    todayStartMs: todayStartMs ?? null,
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
+/**
+ * The integrity half of the Health page: fifteen checks over the same vault —
+ * empty/unreadable/oversized notes, bad frontmatter, case collisions, names
+ * Windows refuses, a stale index, broken links and embeds, duplicate titles,
+ * heavy or orphaned CRDT history, and the recovery copies in `.context/trash`.
+ *
+ * Every check id comes back on every call, even at count 0, in the
+ * `VaultCheckId` order — a check missing from `results` means Rust could not run
+ * it, never that the vault is clean. `count` is the true total; `items` is
+ * capped at 25 examples.
+ *
+ * Heavier than {@link vaultStats}: it reads note CONTENTS, though nothing at or
+ * above the server's 10 MB cap and no embed scan past 2 MB. Run it on demand,
+ * not on a timer. `liveDocs` means what it means there.
+ */
+export const vaultChecks = (liveDocs: Record<string, string>, expectedEpoch?: VaultEpoch) =>
+  invoke<VaultChecks>("vault_checks", { liveDocs, expectedEpoch: expectedEpoch ?? null });
+
+/** Delete every recovery copy under `.context/trash`. The directory survives so
+ *  the next delete has somewhere to go; no note is ever touched. */
+export const emptyTrash = (expectedEpoch?: VaultEpoch) =>
+  invoke<{ filesRemoved: number; bytesFreed: number }>("empty_trash", {
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
+/** Re-reconcile the index against the `.md` files — the remedy for the
+ *  `stale-index` and `unindexed-markdown` checks. Incremental and doc_id-preserving
+ *  (it is not a drop-and-recreate), and it leaves the CRDT tables alone. Resolves
+ *  once the rebuild has committed, then `index-ready` refreshes titles/backlinks. */
+export const rebuildIndex = (expectedEpoch?: VaultEpoch) =>
+  invoke<void>("rebuild_index", { expectedEpoch: expectedEpoch ?? null });
 
 /** Read a dropped/picked host file by absolute path (not vault-scoped). */
 export const readExternalFile = (path: string) =>

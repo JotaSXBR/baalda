@@ -13,6 +13,7 @@ import {
   type SessionInfo,
 } from "../api";
 import * as ipc from "../ipc";
+import type { SessionVerdict } from "../sync/sessionGuard";
 
 /**
  * Keychain key namespace. Bumped from `session:` when macOS builds started being
@@ -151,6 +152,33 @@ export class AuthManager {
 
   async currentSession(): Promise<SessionInfo | null> {
     return this.api.getSession();
+  }
+
+  /**
+   * Re-check the stored session against the server, and drop it if it is gone.
+   *
+   * The same question `init()` asks on launch, asked MID-RUN: the sync layer
+   * calls this when a token mint comes back 401, because that is the only signal
+   * a session that expired or was revoked while the app was open ever produces
+   * (see `sync/sessionGuard.ts`). It is deliberately the whole decision — the
+   * caller acts on the verdict and never on the 401 alone.
+   *
+   * `getSession()` already draws the only line that matters: `null` means the
+   * server ANSWERED that there is no session (401/403, or Better Auth's literal
+   * null body), while anything it cannot make sense of throws and keeps the
+   * token. So `gone` clears the keychain exactly like `init()`'s invalid-token
+   * branch, and an unreachable server changes nothing at all.
+   */
+  async revalidateSession(): Promise<SessionVerdict> {
+    let session: SessionInfo | null;
+    try {
+      session = await this.api.getSession();
+    } catch {
+      return "unreachable"; // server down / offline — decide nothing
+    }
+    if (session) return "valid";
+    await this.clearToken();
+    return "gone";
   }
 
   private async clearToken(): Promise<void> {

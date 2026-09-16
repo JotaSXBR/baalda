@@ -350,6 +350,50 @@ describe("inbound rename", () => {
     expect(vi.mocked(r.api.createNote)).not.toHaveBeenCalled();
   });
 
+  it("refuses a rename onto a path another note already occupies (#129)", async () => {
+    // The doomed rename. A second file is sitting at the destination — a copy, a
+    // half-finished move, a placeholder materialized before the rename was
+    // planned. Rust refuses a rename onto an existing file, so executing this
+    // move can only throw, leave the SOURCE in place, and record the identical
+    // failure on the next pass, and the next, forever — while `releaseDoc` tears
+    // down the open note's provider every single time.
+    //
+    // So the plan refuses it instead: no IPC, no doc release, one honest failure
+    // naming the conflict. Both files stay exactly where they are; choosing
+    // between two copies of someone's note is not this reconciler's call.
+    const disk = new FakeDisk();
+    disk.notes.set("old.md", "d1");
+    install(disk);
+    const state: ServerState = { notes: [{ id: "d1", rel_path: "old.md" }] };
+    const reg = new VaultRegistry(fakeApi(state));
+    const host = recordingHost();
+    reg.setInboundHost(host.host);
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    // Hand the baseline back the way a relaunch reads it.
+    const writes = vi.mocked(ipc.setVaultConfig).mock.calls;
+    vi.mocked(ipc.getVaultConfig).mockResolvedValue(
+      writes[writes.length - 1]?.[0] as never,
+    );
+    // …and now the destination is occupied by a note of its own, while the
+    // server says `d1` moved there.
+    disk.notes.set("new.md", "local-new.md");
+    state.notes = [{ id: "d1", rel_path: "new.md" }];
+    vi.mocked(ipc.renamePath).mockClear();
+
+    await reg.reconcile({ organizationId: ORG, vaultName: "v" });
+
+    expect(ipc.renamePath).not.toHaveBeenCalled();
+    // Nothing was released either — the tear-down only exists to free the path.
+    expect(host.released).toEqual([]);
+    // Both files untouched. Least of all the source, which holds the content.
+    expect([...disk.notes.keys()].sort()).toEqual(["new.md", "old.md"]);
+    // And it is REPORTED, not swallowed: the user is the only one who can say
+    // which of the two copies they meant.
+    const refused = reg.failures().find((f) => f.kind === "inbound" && f.path === "new.md");
+    expect(refused?.reason).toContain("already occupies that path");
+  });
+
   it("does not re-materialize the old path afterwards", async () => {
     // The re-read guard: without it, the outbound half still sees `old.md` as a
     // local note missing from the server and `new.md` as server-only.

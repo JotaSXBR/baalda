@@ -136,6 +136,46 @@ export function syncBadgeTone(args: {
   return status;
 }
 
+/**
+ * What the pill offers once a run has stopped, and what it says about it.
+ *
+ * Pure so the precedence is pinned by a test rather than by a rendered DOM —
+ * the same treatment `syncBadgeLabel` gets, and for the same reason: this is a
+ * remedy the user will click while worried about their notes.
+ *
+ * `explain` outranks `retry` whenever the caller can open the Health page. A
+ * blind retry is the wrong first move on a failed run — the commonest failure
+ * is a note over the server's size cap, where retrying re-fails it and tells the
+ * user nothing. The reason comes first; the retry is one click further in.
+ *
+ * `none` covers a run still moving (the counter is the honest report) and a
+ * caller that gave us no action at all, which is what keeps the pill a plain
+ * `<span>` everywhere it was one before.
+ */
+export function syncBadgeAction(args: {
+  running: boolean;
+  phase?: string | null;
+  failed?: number;
+  hasRetry: boolean;
+  hasHealth: boolean;
+}): { kind: "none" | "retry" | "explain"; cta: string; title?: string } {
+  const { running, phase, failed = 0, hasRetry, hasHealth } = args;
+  if (running || phase !== "error" || (!hasRetry && !hasHealth)) {
+    return { kind: "none", cta: "" };
+  }
+  if (hasHealth) {
+    return {
+      kind: "explain",
+      cta: "See why",
+      title:
+        failed > 0
+          ? `${failed} notes didn't sync — open Health to see why`
+          : "Sync didn't finish — open Health to see why",
+    };
+  }
+  return { kind: "retry", cta: "Sync now", title: "Click to sync now" };
+}
+
 function useNowTick(active: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -154,6 +194,7 @@ export function SyncBadge({
   progress,
   noteOpen,
   onRetry,
+  onOpenHealth,
 }: {
   status: string;
   enabled?: boolean;
@@ -170,6 +211,14 @@ export function SyncBadge({
   /** When set, a run that ended with failures ("N not synced") renders as a
    *  button that retries the whole sync — the remedy lives on the message. */
   onRetry?: () => void;
+  /**
+   * Opens the Health page. When given, a failed run's pill offers "See why"
+   * instead of "Sync now": a user looking at "12 not synced" wants the reason
+   * before the remedy, and blind-retrying a note the server refused for its size
+   * only re-fails it. Falls back to {@link onRetry} when absent, so every
+   * existing caller keeps the button it had.
+   */
+  onOpenHealth?: () => void;
 }) {
   const running = isSyncRunActive(progress);
   // Only tick the relative clock once we're settled (synced, nothing pending, no
@@ -196,9 +245,18 @@ export function SyncBadge({
       ? `${progress.done} of ${progress.total} notes · ${percent}%`
       : undefined;
   // A run that ended with failures is actionable when the caller gave us the
-  // action: the pill becomes a button and one click retries everything.
-  const retryable = onRetry != null && !running && progress?.phase === "error";
-  const title = retryable ? "Click to sync now" : runTitle;
+  // action: the pill becomes a button and one click either explains the failure
+  // (Health) or retries everything.
+  const action = syncBadgeAction({
+    running,
+    phase: progress?.phase,
+    failed: progress?.failed,
+    hasRetry: onRetry != null,
+    hasHealth: onOpenHealth != null,
+  });
+  const retryable = action.kind !== "none";
+  const onAct = action.kind === "explain" ? onOpenHealth : onRetry;
+  const title = retryable ? action.title : runTitle;
   const body = (
     <>
       {tone === "connecting" || (tone === "synced" && pending) ? (
@@ -241,10 +299,10 @@ export function SyncBadge({
         type="button"
         className={`sync-badge sync-badge-retry ${tone}`}
         title={title}
-        onClick={onRetry}
+        onClick={onAct}
       >
         {body}
-        <span className="sync-retry-cta">Sync now</span>
+        <span className="sync-retry-cta">{action.cta}</span>
       </button>
     );
   }

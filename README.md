@@ -127,6 +127,10 @@ Everything else (the desktop app, the search index, the sync server) is a rebuil
 - **Node.js** ≥ 22 (with corepack: `corepack enable` activates the pinned pnpm)
 - **Rust** & Cargo ([rustup.rs](https://rustup.rs))
 - **Docker** (for the Postgres database)
+- **Linux only** — Tauri's system dependencies plus `libdbus-1-dev`, the build
+  header for the Secret Service keychain backend that stores the session token
+  (Debian/Ubuntu: `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+  libxdo-dev libssl-dev libdbus-1-dev build-essential patchelf`)
 
 ### 1. Install dependencies
 

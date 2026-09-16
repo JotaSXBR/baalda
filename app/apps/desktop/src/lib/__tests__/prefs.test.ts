@@ -56,9 +56,9 @@ describe("readEditorMeasure — migration from the old switch", () => {
     }
   });
 
-  it("defaults on a device that has never had either key", () => {
+  it("starts at full width on a device that has never had either key", () => {
     stubStorage();
-    expect(readEditorMeasure()).toBe(EDITOR_MEASURE_DEFAULT);
+    expect(readEditorMeasure()).toBe("full");
   });
 
   it("ignores the legacy key entirely once the new one exists", () => {
@@ -91,7 +91,7 @@ describe("readEditorMeasure — stored values", () => {
   it("treats a blank or unreadable stored value as corruption, not as a request", () => {
     for (const raw of ["", "   ", "abc"]) {
       stubStorage({ [NEW_KEY]: raw });
-      expect(readEditorMeasure()).toBe(EDITOR_MEASURE_DEFAULT);
+      expect(readEditorMeasure()).toBe("full");
     }
   });
 
@@ -102,9 +102,9 @@ describe("readEditorMeasure — stored values", () => {
     expect(readEditorMeasure()).toBe(EDITOR_MEASURE_MIN);
   });
 
-  it("falls back to the default when storage itself throws", () => {
+  it("falls back to full width when storage itself throws", () => {
     stubThrowingStorage();
-    expect(readEditorMeasure()).toBe(EDITOR_MEASURE_DEFAULT);
+    expect(readEditorMeasure()).toBe("full");
     // …and a write on such a device is a no-op rather than a crash.
     expect(() => writeEditorMeasure("full")).not.toThrow();
   });

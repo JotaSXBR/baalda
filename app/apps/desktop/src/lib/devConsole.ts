@@ -40,6 +40,23 @@ function install(info: Sink, warn: Sink, error: Sink): void {
   wrap("log", info);
   wrap("info", info);
   wrap("warn", warn);
+  // React 19 reports an UNCAUGHT render error through `reportError()`, which
+  // raises a window `error` event — it never reaches `console.error`. Without
+  // this listener the terminal gets React's "An error occurred in the <X>
+  // component" warning and nothing else: no message, no stack, no throw site.
+  // That is exactly the state the locked-note crash was diagnosed in.
+  window.addEventListener("error", (e) => {
+    const err = e.error;
+    const detail =
+      err instanceof Error ? `${err.name}: ${err.message}\n${err.stack ?? ""}` : String(err ?? e.message);
+    void error(`[uncaught] ${detail}`.slice(0, 4000)).catch(() => {});
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    const r = e.reason;
+    const detail =
+      r instanceof Error ? `${r.name}: ${r.message}\n${r.stack ?? ""}` : String(r);
+    void error(`[unhandled-rejection] ${detail}`.slice(0, 4000)).catch(() => {});
+  });
   // Boot marks logged before this mirror was installed: replay them now so the
   // terminal timeline starts at the first line of JS, not at the mirror.
   attachEarlySink((line) => void info(line).catch(() => {}));

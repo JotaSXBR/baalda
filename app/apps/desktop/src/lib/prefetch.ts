@@ -8,8 +8,13 @@
  *  sidebar) and means the real `import()` resolves from cache.
  *
  *  Fire-and-forget: a failed prefetch just means the real import pays the cost.
- *  Deliberately NOT warmed: the graph (a rare, deliberate action) and the
- *  welcome screen (dead weight for anyone who already has a vault). */
+ *  Deliberately NOT warmed: the graph (a rare, deliberate action), the welcome
+ *  screen (dead weight for anyone who already has a vault), and MERMAID — ~3 MB
+ *  of diagram renderer that only a note containing a ```mermaid fence ever
+ *  needs. Its single `await import("mermaid")` lives in
+ *  `lib/editor/mermaid/renderer.ts` and must stay the only reference to the
+ *  package: warming it here would hand back the startup cost the code split
+ *  bought, for a feature most vaults never use. */
 export function prefetchAfterPaint(): void {
   const warm = () => {
     void import("../components/Avatar"); // sidebar/footer faces

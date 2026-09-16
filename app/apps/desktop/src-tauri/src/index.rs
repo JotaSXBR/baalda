@@ -7,7 +7,7 @@
 //! forks a note's identity. On rename we update the path column by id, so
 //! inbound links (which store `dst_note_id`) never break.
 
-use crate::error::{AppError, AppResult};
+use crate::error::{io_ctx, AppError, AppResult};
 use crate::notefile::sha256_hex;
 use crate::parse::parse_note;
 use crate::vault::{is_ignored_name, rel_from_abs};
@@ -137,9 +137,19 @@ impl Index {
     /// Open (creating if needed) the index at `<vault>/.context/index.sqlite`.
     pub fn open(vault: &Path) -> AppResult<Self> {
         let context_dir = vault.join(".context");
-        std::fs::create_dir_all(&context_dir)?;
+        // Named + logged rather than a bare `?`: this is one of the three I/O
+        // calls that can fail an open with "The system cannot find the file
+        // specified. (os error 2)" and, until #128, the only way to tell them
+        // apart was to guess.
+        std::fs::create_dir_all(&context_dir)
+            .map_err(io_ctx("create the folder", &context_dir))?;
         let db_path = context_dir.join("index.sqlite");
-        let conn = Connection::open(db_path)?;
+        let conn = Connection::open(&db_path).map_err(|e| {
+            AppError::new(format!(
+                "Couldn't open the index at {}: {e}",
+                db_path.display()
+            ))
+        })?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Wait up to 5s for a contended lock instead of failing immediately with
@@ -1597,6 +1607,103 @@ impl Index {
         Ok(())
     }
 
+    // ---- Vault census (Vault Settings → Health) ---------------------------
+    //
+    // Four aggregate reads behind `stats::collect`. Deliberately queries, not
+    // row dumps: the Health page wants totals, and a vault with 90 000 link
+    // rows must not ship them through the IPC boundary to be counted in TS.
+
+    /// Every `notes` row the census and its integrity checks need: the file
+    /// classifier (a file on disk is a *note* exactly when its vault-relative
+    /// path is a row here), the `duplicate-titles` check, and the `stale-index`
+    /// check's stored mtime. Unordered and un-joined — cheap enough to call on a
+    /// several-thousand-note vault, unlike `list_note_titles`' ORDER BY.
+    ///
+    /// `mtime` is in SECONDS (what `file_mtime` writes), not the milliseconds
+    /// every disk-side number in `stats.rs` carries.
+    pub fn note_rows(&self) -> AppResult<Vec<NoteRow>> {
+        let mut stmt = self.conn.prepare("SELECT id, path, title, mtime FROM notes")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(NoteRow {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                title: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                mtime: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Every wikilink that resolved to nothing, as `(src_note_id, raw target)`,
+    /// grouped by source and in document order within it. The `broken-links`
+    /// check reports these per SOURCE note, so the caller folds the rows; the
+    /// vault-wide total is `link_counts().broken`.
+    pub fn unresolved_links(&self) -> AppResult<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT src_note_id, COALESCE(dst_path_raw, '') FROM links
+              WHERE dst_note_id IS NULL
+              ORDER BY src_note_id, position",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// How many distinct `#tag` names the index holds.
+    ///
+    /// `tags` rows outlive the last note that used them (see `list_tags`), so
+    /// this is "tags this vault knows about", which is exactly what the tag
+    /// completion list shows — the two numbers agree by construction.
+    pub fn tag_count(&self) -> AppResult<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))?)
+    }
+
+    /// Wikilinks split by whether they found a note. `dst_note_id IS NULL` is
+    /// how `resolve_links` records a link it could not resolve, so the broken
+    /// half is the vault's dangling `[[…]]` references.
+    pub fn link_counts(&self) -> AppResult<LinkCounts> {
+        let (resolved, broken) = self.conn.query_row(
+            "SELECT COUNT(dst_note_id), COUNT(*) - COUNT(dst_note_id) FROM links",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        Ok(LinkCounts { resolved, broken })
+    }
+
+    /// Per-doc CRDT footprint: update-log rows and the bytes of the log plus the
+    /// snapshot. Unsorted — the caller ranks and joins against `notes`.
+    ///
+    /// A doc that has only a *state vector* (the NULL-snapshot row
+    /// `save_yjs_state_vectors` writes for the sync manifest) is deliberately
+    /// absent: it carries neither an update nor a snapshot, so counting it would
+    /// report history the vault does not actually store.
+    pub fn history_footprints(&self) -> AppResult<Vec<DocHistory>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT doc_id, SUM(updates) AS updates, SUM(bytes) AS bytes FROM (
+                 SELECT doc_id,
+                        COUNT(*) AS updates,
+                        COALESCE(SUM(LENGTH(\"update\")), 0) AS bytes
+                   FROM yjs_updates
+                  WHERE doc_id IS NOT NULL
+                  GROUP BY doc_id
+                 UNION ALL
+                 SELECT doc_id, 0 AS updates, LENGTH(snapshot) AS bytes
+                   FROM yjs_snapshot
+                  WHERE doc_id IS NOT NULL AND snapshot IS NOT NULL
+             )
+             GROUP BY doc_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DocHistory {
+                doc_id: r.get(0)?,
+                updates: r.get(1)?,
+                bytes: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// `VACUUM` the index, returning the bytes the file gave back.
     ///
     /// Deleting rows only frees SQLite *pages*, which the file keeps. After a
@@ -1626,6 +1733,35 @@ impl Index {
             .unwrap_or(0);
         page_count * page_size
     }
+}
+
+/// One `notes` row as the Health census reads it — see [`Index::note_rows`].
+#[derive(Debug, Clone)]
+pub struct NoteRow {
+    pub id: String,
+    pub path: String,
+    /// The derived index title (frontmatter `title:` → first H1 → stem), which
+    /// is NOT what the sidebar displays. Empty when the column is NULL.
+    pub title: String,
+    /// The mtime recorded at index time, in SECONDS.
+    pub mtime: i64,
+}
+
+/// Resolved vs dangling wikilinks — see [`Index::link_counts`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LinkCounts {
+    pub resolved: i64,
+    pub broken: i64,
+}
+
+/// One doc's raw CRDT footprint in the local store — see
+/// [`Index::history_footprints`]. Not serialized: `stats.rs` joins it against
+/// `notes` and turns it into the `HistoryFootprint` the UI sees.
+#[derive(Debug, Clone)]
+pub struct DocHistory {
+    pub doc_id: String,
+    pub updates: i64,
+    pub bytes: i64,
 }
 
 /// What one {@link Index::prune_yjs_docs} pass removed.
