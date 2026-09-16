@@ -77,3 +77,55 @@ describe("AuthManager.signInWithGoogle", () => {
     expect(ipc.keychainSet).not.toHaveBeenCalled();
   });
 });
+
+// The mid-run session check behind the #145 banner. `getSession` already draws
+// the only line that matters — `null` is the server ANSWERING "no session"
+// (401/403, or Better Auth's literal null body), anything it cannot make sense
+// of throws and keeps the token — so this is about what the AuthManager does
+// with each answer, because the sync layer signs the app out on `gone`.
+describe("AuthManager.revalidateSession", () => {
+  it("answers 'valid' and keeps the token when the session is real", async () => {
+    vi.mocked(ipc.keychainDelete).mockClear();
+    const mgr = new AuthManager(
+      fakeApi({
+        getSession: vi.fn(async () => ({
+          user: { id: "u1", email: "a@b.co", name: "" },
+          activeOrganizationId: "o1",
+        })),
+      } as Partial<ApiClient>),
+    );
+
+    await expect(mgr.revalidateSession()).resolves.toBe("valid");
+    expect(ipc.keychainDelete).not.toHaveBeenCalled();
+  });
+
+  it("answers 'gone' and drops the stored token", async () => {
+    vi.mocked(ipc.keychainDelete).mockClear();
+    const setToken = vi.fn();
+    const mgr = new AuthManager(
+      fakeApi({ getSession: vi.fn(async () => null), setToken } as Partial<ApiClient>),
+    );
+
+    await expect(mgr.revalidateSession()).resolves.toBe("gone");
+    // Same clean-up as `init()`'s invalid-token branch: a token the server has
+    // already rejected must not survive to the next launch.
+    expect(setToken).toHaveBeenCalledWith(null);
+    expect(ipc.keychainDelete).toHaveBeenCalledWith("session-v2:http://localhost:3010");
+  });
+
+  it("answers 'unreachable' and keeps the token when the server does not answer", async () => {
+    // The load-bearing one: a thrown request is offline/server-down, and signing
+    // a local-first app out over it would be the worst possible reading of it.
+    vi.mocked(ipc.keychainDelete).mockClear();
+    const mgr = new AuthManager(
+      fakeApi({
+        getSession: vi.fn(async () => {
+          throw new Error("fetch failed");
+        }),
+      } as Partial<ApiClient>),
+    );
+
+    await expect(mgr.revalidateSession()).resolves.toBe("unreachable");
+    expect(ipc.keychainDelete).not.toHaveBeenCalled();
+  });
+});

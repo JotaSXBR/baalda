@@ -16,7 +16,7 @@ import { bridgeManager, createTauriBridgeIO, sha256Hex } from "../bridge/adapter
 import type { NoteLastEdited, SessionInfo } from "../api";
 import * as ipc from "../ipc";
 import { markOnce } from "../perf";
-import { api } from "../auth/authManager";
+import { api, authManager } from "../auth/authManager";
 import { colorForUser, presenceUser } from "../presence/color";
 import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
@@ -27,6 +27,7 @@ import { collectCrdtGarbage } from "./crdtGc";
 import { runPool } from "./pool";
 import { SyncProgressReporter } from "./progress";
 import { decideSeed } from "./startup";
+import { SessionRejectionGuard } from "./sessionGuard";
 import { DocSync, type SyncStatus } from "./syncManager";
 import { VaultRegistry, type InboundHost } from "./registry";
 import { VaultDocStore, createIpcManifestStore } from "./vaultDocStore";
@@ -302,6 +303,18 @@ export class SyncManager implements InboundHost {
   /** The local user's chosen activity status, broadcast via awareness. */
   private status: ActivityStatus = "online";
   private onStatus?: (status: SyncStatus) => void;
+  private onSessionRejected?: () => void;
+  /**
+   * The one place a 401 at token mint is turned into a verdict about the
+   * SESSION. Every mint path below reports into it — the open note's provider,
+   * the bulk uploader's per-doc providers, the vault channel — and it re-checks
+   * the session before anything acts, at most once per episode. See
+   * `sessionGuard.ts` for why a single 401 is never enough.
+   */
+  private readonly sessionGuard = new SessionRejectionGuard({
+    probe: () => authManager.revalidateSession(),
+    onSessionGone: () => this.onSessionRejected?.(),
+  });
   private onPending?: (pending: boolean) => void;
   private onFlushed?: () => void;
   private onRegistryChanged?: () => void;
@@ -551,6 +564,25 @@ export class SyncManager implements InboundHost {
   /** UI subscribes here to render the connection indicator. */
   setStatusListener(cb: ((status: SyncStatus) => void) | undefined): void {
     this.onStatus = cb;
+  }
+
+  /**
+   * The store subscribes here to learn that the server has REFUSED this app's
+   * session — checked, not guessed (see {@link sessionGuard}).
+   *
+   * Fires at most once per session: the handler flips `authStatus` to
+   * `signed-out` and tears sync down, which is what finally makes a session that
+   * lapsed mid-run look different from being offline (#145). Until it does, a
+   * 401 at mint is indistinguishable from a dropped connection — the app keeps
+   * accepting edits that go nowhere, and only the NEXT launch notices.
+   */
+  setSessionRejectedListener(cb: (() => void) | undefined): void {
+    this.onSessionRejected = cb;
+  }
+
+  /** A token mint (a note's or the vault channel's) came back 401. */
+  private noteSessionRejected(): void {
+    void this.sessionGuard.reject();
   }
 
   /**
@@ -1596,7 +1628,16 @@ export class SyncManager implements InboundHost {
           }),
         release: (docId) => store.demote(docId),
         connect: ({ docId, vaultId: collectionId, doc }) =>
-          new DocSync({ api, doc, docId, vaultId: collectionId }),
+          new DocSync({
+            api,
+            doc,
+            docId,
+            vaultId: collectionId,
+            // A run connects one provider per note, so a lapsed session refuses
+            // a mint for every doc in the vault in seconds. The guard coalesces
+            // that burst into ONE session check.
+            onSessionRejected: () => this.noteSessionRejected(),
+          }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
@@ -2026,6 +2067,11 @@ export class SyncManager implements InboundHost {
       this.disable();
       return { ok: false, reason: "no active organization" };
     }
+    // A live session is in hand again (a sign-in, a server switch, a vault
+    // switch), so re-arm the 401 guard. It latches shut on a confirmed
+    // sign-out — that latch is what stops a torn-down vault's last few mints
+    // from re-running the sign-out — and this is the only thing that opens it.
+    this.sessionGuard.reset();
     // Retire whatever was running for the previous vault BEFORE any await, so no
     // old-vault work can interleave with this reconcile.
     this.teardown();
@@ -2281,7 +2327,16 @@ export class SyncManager implements InboundHost {
           }),
         release: (docId) => store.demote(docId),
         connect: ({ docId, vaultId: collectionId, doc }) =>
-          new DocSync({ api, doc, docId, vaultId: collectionId }),
+          new DocSync({
+            api,
+            doc,
+            docId,
+            vaultId: collectionId,
+            // A run connects one provider per note, so a lapsed session refuses
+            // a mint for every doc in the vault in seconds. The guard coalesces
+            // that burst into ONE session check.
+            onSessionRejected: () => this.noteSessionRejected(),
+          }),
         readFile: (relPath) => ipc.readNote(relPath, scope.vaultEpoch),
       },
       isPushed: (docId) => this.registry.isPushed(docId),
@@ -2846,6 +2901,11 @@ export class SyncManager implements InboundHost {
           this.handleRegistryChanged("channel-synced");
         }
       },
+      // The vault token mint was refused with a 401 — the session, not the
+      // vault. Reaches the same guard as the per-note mints above; with no note
+      // open this channel is the ONLY thing still minting, so without it a
+      // signed-out app that is merely sitting on its sidebar never notices.
+      onSessionRejected: () => this.noteSessionRejected(),
       // An ACL change in this vault may have flipped the open note's grant
       // (view↔edit, lock/unlock). Re-mint its token so the editor becomes
       // read-only/editable live — no reopen (spec 04 §4).
@@ -2972,6 +3032,10 @@ export class SyncManager implements InboundHost {
       docId: mapping.docId,
       vaultId: mapping.vaultId,
       onStatus: (s) => this.handleDocStatus(s),
+      // The open note's refresher re-mints 60s before its JWT expires
+      // (`tokenRefresh.ts`), so on a long-lived session this is usually the
+      // first mint to meet a session that lapsed while the app stayed open.
+      onSessionRejected: () => this.noteSessionRejected(),
       onPending: this.onPending,
       onFlushed: this.onFlushed,
     });

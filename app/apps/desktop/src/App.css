@@ -2796,6 +2796,22 @@ body:has(.sidebar-resizer.dragging) {
   padding: var(--sp-3) 96px;
 }
 
+/* Not-syncing strip (#145): the banner shape, but flush across the whole note
+   pane rather than floating inside it. A card in the same amber is what the user
+   scrolled past for days; a strip that owns the full width of the thing they are
+   typing into cannot be read as decoration. Both themes come free — the warning
+   pair are theme tokens, and the border is mixed from `--warning` the same way
+   the editor's lock banner does it. */
+.not-syncing-banner {
+  margin: 0;
+  border-radius: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  padding: var(--sp-3) var(--sp-6);
+}
+.not-syncing-banner strong {
+  color: var(--warning);
+}
+
 /* Member-joined celebration: same banner shape, an accent tint, and a gentle
    entrance so it reads as a happy moment rather than an alert. */
 .celebrate-banner {
