@@ -53,6 +53,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **"Syncing" on note open, second cause.** Opening a note connects its doc;
+  the server's version capture stamps `last edited` on the first change of a
+  session and broadcasts `registry-changed`; every client then re-pulls the
+  registry, and `syncStructure` announced `phase("registering", 0)` even with
+  nothing to create — the pill showed "Syncing" for one listing round-trip. The
+  announcement is now gated on `missingFolders + missingNotes > 0`; the initial
+  `reconcile` keeps its own early "life" announcement. Server behaviour is
+  unchanged (the stamp is what makes `notes.updated_at` truthful, #104).
 - **"Syncing" flash on every note open/switch.** `ContentUploader.run()`
   announced `phase("uploading", n)` and stamped every queued doc `queued`
   BEFORE the per-note ingest fast-path decided whether anything had changed, so

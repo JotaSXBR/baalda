@@ -2077,7 +2077,15 @@ export class VaultRegistry {
         !this.aliasPaths.has(n.path),
     );
 
-    this.sink.phase("registering", missingFolders.length + missingNotes.length);
+    // Announce the phase only when there is something to create. A pull with
+    // nothing missing — the common case: the server broadcast `registry-changed`
+    // for a checkpoint stamp, a teammate's rename, our own last-edited mark —
+    // used to announce "registering 0" here, which the corner pill rendered as
+    // "Syncing" for the length of the listing round-trip on every note open.
+    // The initial `reconcile` still shows life on its own (see its early
+    // `phase("registering", 0)`); this is the quiet path for everything after.
+    const toCreate = missingFolders.length + missingNotes.length;
+    if (toCreate > 0) this.sink.phase("registering", toCreate);
 
     // Titles + local doc_ids for the notes we are about to CREATE server-side —
     // so the index read happens only when there is something to create (on a
