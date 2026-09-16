@@ -9,8 +9,18 @@
 //!
 //! The `SecretStore` trait keeps the logic testable: unit tests run against an
 //! in-memory store so they never trigger a real-keychain permission prompt.
+//!
+//! **Each backend must be named as a `keyring` feature in `Cargo.toml`** —
+//! keyring 3 has no default store and silently falls back to its in-memory
+//! `mock` on any platform whose feature is missing. That fallback accepts every
+//! write and loses it at exit, so the app starts signed out on every launch with
+//! nothing in the log to say why (#136 on Windows, #129 on Linux). The features
+//! belong to `keyring`, not to this crate, so `cfg!` cannot check them here;
+//! `warn_if_ephemeral` asks the built store at runtime instead, and
+//! `os_store_persists` pins it in the test suite.
 
 use crate::error::{AppError, AppResult};
+use keyring::credential::CredentialPersistence;
 
 /// Keychain "service" namespace for all Baalda secrets.
 ///
@@ -26,11 +36,44 @@ pub trait SecretStore {
     fn delete(&self, key: &str) -> AppResult<()>;
 }
 
+/// Does this build's `keyring` resolve to a store that outlives the process?
+///
+/// The `mock` fallback reports `EntryOnly` (the secret lives in the `Entry`
+/// object itself); every real OS store reports `UntilDelete`. Cheap to ask —
+/// building a credential *builder* neither opens the store nor prompts.
+fn store_persists() -> bool {
+    matches!(
+        keyring::default::default_credential_builder().persistence(),
+        CredentialPersistence::UntilDelete | CredentialPersistence::UntilReboot
+    )
+}
+
+/// Say so, loudly and once, if this build has no real credential store. Without
+/// this the failure is invisible: every call succeeds and the secret is simply
+/// gone next launch.
+fn warn_if_ephemeral() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if !store_persists() {
+            log::error!(
+                "keychain: this build has no OS credential store (keyring fell back to its \
+                 in-memory mock) — session tokens will not survive a restart"
+            );
+        }
+    });
+}
+
 /// Real OS keychain backed by the `keyring` crate.
 pub struct OsKeychain;
 
 impl OsKeychain {
+    /// A fresh `Entry` per call is deliberate and correct: an `Entry` is just
+    /// the (service, key) address, and every real backend reads/writes the OS
+    /// store on each call. Only the `mock` store keeps its values inside the
+    /// `Entry`, which is why a mock build looks like it "never sees" what it
+    /// wrote (#129).
     fn entry(key: &str) -> AppResult<keyring::Entry> {
+        warn_if_ephemeral();
         keyring::Entry::new(SERVICE, key)
             .map_err(|e| AppError::new(format!("keychain entry ({key}): {e}")))
     }
@@ -138,6 +181,20 @@ mod tests {
         store.delete("session:http://a").unwrap();
         assert_eq!(store.get("session:http://a").unwrap(), None);
         assert_eq!(store.get("session:http://b").unwrap(), Some("B".into()));
+    }
+
+    /// The shipped platforms must all resolve to a persistent store — this is
+    /// the regression guard on the `keyring` feature list in `Cargo.toml`
+    /// (drop one and this build silently gets the in-memory mock). Constructing
+    /// the builder touches no store, so there is no permission prompt.
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    fn os_store_persists() {
+        assert!(
+            store_persists(),
+            "keyring resolved to a non-persistent store — is this platform's backend \
+             feature missing from Cargo.toml?"
+        );
     }
 
     /// Real macOS keychain round-trip. Ignored by default because on an unsigned
