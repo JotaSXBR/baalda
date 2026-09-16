@@ -329,6 +329,14 @@ export function Editor() {
   const viewRef = useRef<EditorView | null>(null);
 
   const openNote = useStore((s) => s.openNote);
+  // The note the user has CLICKED, which is not yet the open one. `openNoteByPath`
+  // registers the note server-side before it sets `openNote`, and that is a
+  // network round trip — ~0ms against a local server, hundreds against the
+  // managed one. Until this was read here, the editor column ignored the whole
+  // window: the click painted nothing, the previous note just sat there, and the
+  // loading skeleton only appeared for the (fast, local) half that came after.
+  // That is why the loader looked broken in production and fine in dev.
+  const openingNotePath = useStore((s) => s.openingNotePath);
   const syncEnabled = useStore((s) => s.syncEnabled);
   const locks = useStore((s) => s.locks);
   const lifts = useStore((s) => s.lifts);
@@ -803,6 +811,9 @@ export function Editor() {
   };
 
   const showToolbar = peers.length > 0;
+  // A different note is on its way in. Reopening the SAME path (a tab click) is
+  // not "opening another" — `!viewMounted` already covers that one.
+  const isOpeningAnother = openingNotePath != null && openingNotePath !== notePath;
   // "from 2h ago" for the pill. The panel holds the metadata; the preview state
   // carries only the id + text, so look the timestamp back up here.
   const previewedAt =
@@ -903,7 +914,15 @@ export function Editor() {
           </div>
         )}
       </div>
-      {!viewMounted && <EditorSkeleton immediate={switchingNoteRef.current} />}
+      {/* One continuous loading state, from the click to the first painted line.
+          `openingNotePath` covers the registration round trip (the old note is
+          still on screen, so the bars fade in over it); `!viewMounted` covers
+          the bridge open and the CodeMirror build that follow. Both render the
+          same element in the same place, so the swap is one animation rather
+          than the old note → bare pane → bars → text flicker. */}
+      {(!viewMounted || isOpeningAnother) && (
+        <EditorSkeleton immediate={switchingNoteRef.current} />
+      )}
     </div>
   );
 }
