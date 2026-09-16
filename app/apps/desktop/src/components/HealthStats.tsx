@@ -5,7 +5,7 @@
    just as true for a vault that has never had a server. */
 import { useState } from "react";
 import type { HistoryFootprint, SizedFile, VaultCheckId, VaultStats } from "../lib/health/types";
-import { activityLevel, formatBytes, relativeTime } from "../lib/health/format";
+import { activityCellTitle, activityGrid, formatBytes, relativeTime } from "../lib/health/format";
 import { MAX_NOTE_BYTES } from "../lib/sync/contentUpload";
 import { AsyncButton } from "./AsyncButton";
 import { Glyph, PathText, type GlyphName, type HealthHandlers } from "./HealthShared";
@@ -179,45 +179,71 @@ export function HealthStats({
  * beside one full-height block. A filled cell with its count inside is legible
  * at every distribution, including a single week and a flat one.
  */
-export function HealthActivity({ activity }: { activity: VaultStats["activity"] }) {
-  const weeks = activity.weeks ?? [];
-  const peak = Math.max(0, ...weeks);
+export function HealthActivity({
+  activity,
+  now = Date.now(),
+}: {
+  activity: VaultStats["activity"];
+  /** Fixes which weekday "today" is; injectable for tests. */
+  now?: number;
+}) {
+  const days = activity.days ?? [];
+  const grid = activityGrid(days, now);
   const caption =
     `${activity.modifiedLast7d.toLocaleString()} ${activity.modifiedLast7d === 1 ? "note" : "notes"} ` +
     `edited in the last 7 days · ${activity.modifiedLast30d.toLocaleString()} in 30 days`;
+  const active = days.filter((n) => n > 0).length;
 
   return (
     <div className="health-activity">
       <p className="health-activity-lead">{caption}</p>
-      <div
-        className="health-weeks"
-        role="img"
-        aria-label={
-          weeks.length === 0
-            ? caption
-            : `Notes edited per week, oldest first: ${weeks.join(", ")}. ${caption}`
-        }
-      >
-        {weeks.map((n, i) => (
-          <span
-            key={i}
-            className="health-week"
-            data-level={activityLevel(n, peak)}
-            data-current={i === weeks.length - 1 ? "" : undefined}
-            title={
-              i === weeks.length - 1
-                ? `This week · ${n.toLocaleString()}`
-                : `${weeks.length - 1 - i} ${weeks.length - 2 === i ? "week" : "weeks"} ago · ${n.toLocaleString()}`
-            }
-          >
-            <span className="health-week-n">{n > 0 ? n.toLocaleString() : ""}</span>
+      {grid.columns === 0 ? (
+        <p className="muted">No per-day activity is available for this vault.</p>
+      ) : (
+        <div
+          className="health-heatmap"
+          role="img"
+          aria-label={`Notes edited per day over the last ${days.length} days: ${active} active ${active === 1 ? "day" : "days"}. ${caption}`}
+          style={{ ["--heat-cols" as string]: grid.columns }}
+        >
+          {grid.months.map((m) => (
+            <span
+              key={`${m.label}-${m.col}`}
+              className="health-heat-month"
+              style={{ gridColumn: m.col + 2, gridRow: 1 }}
+              aria-hidden="true"
+            >
+              {m.label}
+            </span>
+          ))}
+          <span className="health-heat-day" style={{ gridRow: 3 }} aria-hidden="true">
+            Mon
           </span>
-        ))}
-      </div>
-      <div className="health-weeks-axis" aria-hidden="true">
-        <span>12 wk ago</span>
-        <span>this week</span>
-      </div>
+          <span className="health-heat-day" style={{ gridRow: 5 }} aria-hidden="true">
+            Wed
+          </span>
+          <span className="health-heat-day" style={{ gridRow: 7 }} aria-hidden="true">
+            Fri
+          </span>
+          {grid.cells.map((c) => (
+            <span
+              key={c.date}
+              className="health-heatcell"
+              data-level={c.level}
+              data-today={c.today ? "" : undefined}
+              style={{ gridColumn: c.col + 2, gridRow: c.row + 2 }}
+              title={activityCellTitle(c)}
+            />
+          ))}
+          <div className="health-heatmap-legend" aria-hidden="true">
+            <span>Less</span>
+            {[0, 1, 2, 3, 4].map((l) => (
+              <span key={l} className="health-heatcell" data-level={l} />
+            ))}
+            <span>More</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

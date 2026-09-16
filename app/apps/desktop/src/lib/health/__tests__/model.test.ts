@@ -55,7 +55,7 @@ function statsWith(over: Partial<VaultStats> = {}): VaultStats {
     largestNotes: [],
     largestFiles: [],
     heaviestHistory: [],
-    activity: { modifiedLast7d: 1, modifiedLast30d: 2, weeks: [] },
+    activity: { modifiedLast7d: 1, modifiedLast30d: 2, weeks: [], days: [] },
     ...over,
   };
 }
@@ -504,7 +504,7 @@ describe("stats-derived issues and stages", () => {
       largestNotes: [],
       largestFiles: [],
       heaviestHistory: [],
-      activity: { modifiedLast7d: 12, modifiedLast30d: 40, weeks: [] },
+      activity: { modifiedLast7d: 12, modifiedLast30d: 40, weeks: [], days: [] },
       ...over,
     };
   }
@@ -625,7 +625,7 @@ describe("issue ordering", () => {
           largestNotes: [],
           largestFiles: [],
           heaviestHistory: [],
-          activity: { modifiedLast7d: 0, modifiedLast30d: 0, weeks: [] },
+          activity: { modifiedLast7d: 0, modifiedLast30d: 0, weeks: [], days: [] },
         },
         failures: {
           registry: [],

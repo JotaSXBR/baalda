@@ -1603,3 +1603,78 @@ button.health-metric-flag:hover {
     transition: none;
   }
 }
+
+/* ── Activity heat-map (per day, GitHub-style) ────────────────────────────── */
+/* One grid for labels and cells, so they cannot drift apart: column 1 holds
+   the weekday labels, row 1 the month labels, and the cells fill the rest.
+   Columns are fractions of the card, so a year stretches edge to edge the
+   way GitHub's does and the cells scale with the window. */
+.health-heatmap {
+  --heat-gap: 3px;
+  display: grid;
+  grid-template-columns: max-content repeat(var(--heat-cols), minmax(0, 1fr));
+  grid-template-rows: 14px repeat(7, auto) auto;
+  gap: var(--heat-gap);
+  width: 100%;
+  align-items: stretch;
+}
+.health-heat-month {
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: visible;
+}
+.health-heat-day {
+  grid-column: 1;
+  align-self: center;
+  padding-right: var(--sp-1);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-tertiary);
+}
+.health-heatcell {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  min-width: 0;
+  border-radius: 2px;
+  background: var(--bg-active);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-primary) 6%, transparent);
+}
+.health-heatcell[data-level="1"] {
+  background: color-mix(in srgb, var(--accent) 30%, var(--bg-surface));
+}
+.health-heatcell[data-level="2"] {
+  background: color-mix(in srgb, var(--accent) 55%, var(--bg-surface));
+}
+.health-heatcell[data-level="3"] {
+  background: color-mix(in srgb, var(--accent) 78%, var(--bg-surface));
+}
+.health-heatcell[data-level="4"] {
+  background: var(--accent);
+}
+.health-heatcell[data-today] {
+  box-shadow: 0 0 0 1.5px var(--accent);
+}
+.health-heatmap-legend {
+  grid-column: 2 / -1;
+  grid-row: 9;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--heat-gap);
+  margin-top: var(--sp-2);
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+.health-heatmap-legend .health-heatcell {
+  width: 10px;
+  height: 10px;
+}
+.health-heatmap-legend span:first-child {
+  margin-right: 2px;
+}
+.health-heatmap-legend span:last-child {
+  margin-left: 2px;
+}

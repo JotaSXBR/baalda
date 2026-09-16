@@ -235,6 +235,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   so a refused credential stops the ladder instead of being retried.
 
 ### Changed
+- **Activity as a per-day heat-map.** `vault_stats` gains `activity.days`
+  (371 calendar days = 53 week columns, oldest first, today last) cut at the caller's local
+  midnight (`todayStartMs`, new optional command arg; `None` ⇒ rolling 24 h
+  windows) because Rust has no timezone table to guess with. `format.ts
+  activityGrid` lays the series out GitHub-style — a column per week, Sunday-
+  first rows, month labels where a month's first day falls, today ringed — and
+  `HealthActivity` renders it with five accent shades and a Less/More legend.
+  The weekly strip is gone; `activity.weeks` stays in the payload.
 - **Content width defaults to full** (`prefs.ts EDITOR_MEASURE_UNSET`). A device
   with no stored choice — and a blank or unreadable value — reads `"full"`; a
   stored measure is untouched, and the legacy "Readable line length" switch still

@@ -1869,11 +1869,12 @@ pub async fn list_attachments(
 pub async fn vault_stats(
     state: State<'_, AppState>,
     live_docs: std::collections::HashMap<String, String>,
+    today_start_ms: Option<i64>,
     expected_epoch: Option<u64>,
 ) -> AppResult<VaultStats> {
     let (vault, index) = require_vault_at(&state, expected_epoch)?;
     let guard = index.lock().unwrap();
-    stats::collect(&vault, &guard, &live_docs)
+    stats::collect(&vault, &guard, &live_docs, today_start_ms)
 }
 
 /// The integrity half of the Health page: fifteen checks over the same vault,

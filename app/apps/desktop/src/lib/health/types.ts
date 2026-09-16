@@ -83,6 +83,11 @@ export interface VaultStats {
     /** Notes modified per rolling 7-day window for the last 12 windows,
      *  OLDEST first; index 11 is the window ending now. */
     weeks: number[];
+    /** Notes modified per CALENDAR day for the last 371 days (53 weeks), OLDEST
+     *  first; the last entry is today. Days are cut at the local midnight the caller
+     *  passes to `vault_stats` (`todayStartMs`), so a note edited at 23:50
+     *  yesterday counts for yesterday. */
+    days: number[];
   };
 }
 

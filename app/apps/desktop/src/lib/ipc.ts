@@ -566,8 +566,17 @@ export const listAttachments = (expectedEpoch?: VaultEpoch) =>
  * the same live set `pruneYjsDocs` is given — so "N reclaimable" and what
  * Reclaim actually removes can never disagree.
  */
-export const vaultStats = (liveDocs: Record<string, string>, expectedEpoch?: VaultEpoch) =>
-  invoke<VaultStats>("vault_stats", { liveDocs, expectedEpoch: expectedEpoch ?? null });
+export const vaultStats = (
+  liveDocs: Record<string, string>,
+  expectedEpoch?: VaultEpoch,
+  /** The caller's local midnight (ms), so `activity.days` is cut on calendar days. */
+  todayStartMs?: number,
+) =>
+  invoke<VaultStats>("vault_stats", {
+    liveDocs,
+    todayStartMs: todayStartMs ?? null,
+    expectedEpoch: expectedEpoch ?? null,
+  });
 
 /**
  * The integrity half of the Health page: fifteen checks over the same vault —

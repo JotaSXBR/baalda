@@ -48,6 +48,8 @@ const TOP_N: usize = 10;
 
 /// Buckets in the activity strip, newest last (index 11 contains now).
 const ACTIVITY_WEEKS: usize = 12;
+/// A year of days: 53 week-columns, the shape GitHub's contribution graph has.
+pub const ACTIVITY_DAYS: usize = 371;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const WEEK_MS: i64 = 7 * DAY_MS;
 
@@ -119,6 +121,8 @@ pub struct ActivityStats {
     /// Notes modified per 7-day window, OLDEST first; index 11 is the window
     /// ending now. Anything older than 12 windows is dropped.
     pub weeks: Vec<i64>,
+    /// Per calendar day, last `ACTIVITY_DAYS`, oldest first; today last.
+    pub days: Vec<i64>,
 }
 
 /// The whole census. See the module doc for the cost and the ignore rules.
@@ -249,6 +253,7 @@ pub fn collect(
     vault: &Path,
     index: &Index,
     live_docs: &HashMap<String, String>,
+    today_start_ms: Option<i64>,
 ) -> AppResult<VaultStats> {
     let computed_at = now_ms();
     let Census {
@@ -274,7 +279,7 @@ pub fn collect(
         bytes: others.iter().map(|f| f.bytes).sum(),
     };
 
-    let activity = activity_from(&notes, computed_at);
+    let activity = activity_from(&notes, computed_at, today_start_ms);
 
     let largest_notes = top_files(notes);
     let mut rest = attachments;
@@ -343,10 +348,18 @@ fn top_files(mut files: Vec<SizedFile>) -> Vec<SizedFile> {
 /// would be a partial week that looks like a slump. A file dated in the future
 /// (clock skew, a restored backup) lands in the newest bucket rather than
 /// underflowing out of the strip.
-fn activity_from(notes: &[SizedFile], now_ms: i64) -> ActivityStats {
+/// `today_start_ms` is the caller's LOCAL midnight. Rust has no timezone table
+/// here and must not guess one, so the UI passes the boundary and the per-day
+/// buckets are cut on real calendar days; with `None` they fall back to rolling
+/// 24-hour windows ending now.
+fn activity_from(notes: &[SizedFile], now_ms: i64, today_start_ms: Option<i64>) -> ActivityStats {
     let mut weeks = vec![0i64; ACTIVITY_WEEKS];
+    let mut days = vec![0i64; ACTIVITY_DAYS];
     let mut last7 = 0i64;
     let mut last30 = 0i64;
+    // A midnight in the future (a clock that jumped) would put every note in
+    // "yesterday"; clamp it to now.
+    let today_start = today_start_ms.unwrap_or(now_ms).min(now_ms);
     for note in notes {
         let age = now_ms - note.mtime;
         if age < 7 * DAY_MS {
@@ -359,11 +372,29 @@ fn activity_from(notes: &[SizedFile], now_ms: i64) -> ActivityStats {
         if bucket < ACTIVITY_WEEKS as i64 {
             weeks[ACTIVITY_WEEKS - 1 - bucket as usize] += 1;
         }
+        // Calendar days ago: anything since today's midnight is 0; before it,
+        // ceil((midnight - mtime) / day), so 23:50 yesterday is 1, not 0. With
+        // no midnight the windows are rolling 24 h ending now, so plain floor.
+        let days_ago = match today_start_ms {
+            Some(_) if note.mtime >= today_start => 0,
+            Some(_) => (today_start - note.mtime + DAY_MS - 1) / DAY_MS,
+            None => {
+                if age < 0 {
+                    0
+                } else {
+                    age / DAY_MS
+                }
+            }
+        };
+        if days_ago < ACTIVITY_DAYS as i64 {
+            days[ACTIVITY_DAYS - 1 - days_ago as usize] += 1;
+        }
     }
     ActivityStats {
         modified_last7d: last7,
         modified_last30d: last30,
         weeks,
+        days,
     }
 }
 
@@ -454,7 +485,7 @@ mod tests {
     #[test]
     fn counts_notes_folders_attachments_and_other_files() {
         let (tmp, index) = fixture();
-        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new(), None).unwrap();
 
         assert_eq!(stats.notes.count, 3, "Alpha, Empty, sub/Beta");
         assert_eq!(stats.notes.empty, 1, "Empty.md is 0 bytes");
@@ -477,7 +508,7 @@ mod tests {
     #[test]
     fn index_aggregates_follow_the_sqlite_tables() {
         let (tmp, index) = fixture();
-        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new(), None).unwrap();
 
         assert_eq!(stats.tags, 1, "#work");
         assert_eq!(stats.links, 1, "[[Beta]] resolves");
@@ -498,7 +529,7 @@ mod tests {
         index.append_yjs_update("truly-orphan", &[0u8; 32]).unwrap();
         let mut live = HashMap::new();
         live.insert("registry-id".to_string(), "a.md".to_string());
-        let stats = collect(tmp.path(), &index, &live).unwrap();
+        let stats = collect(tmp.path(), &index, &live, None).unwrap();
         assert_eq!(stats.history.orphan_docs, 1);
         assert_eq!(stats.history.orphan_bytes, 32);
         let reg = stats
@@ -521,7 +552,7 @@ mod tests {
         // A doc the notes table has never heard of — deleted, rebound or forked.
         index.append_yjs_update("orphan-doc", &[0u8; 128]).unwrap();
 
-        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new(), None).unwrap();
         assert_eq!(stats.history.docs, 3);
         assert_eq!(stats.history.updates, 4);
         assert_eq!(stats.history.bytes, 64 + 32 + 8 + 128);
@@ -550,7 +581,7 @@ mod tests {
             .save_yjs_state_vectors(&[("sv-only".to_string(), vec![0u8; 16])])
             .unwrap();
 
-        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new(), None).unwrap();
         assert_eq!(stats.history.docs, 1, "the state-vector-only doc is skipped");
         let alpha_row = stats
             .heaviest_history
@@ -577,7 +608,7 @@ mod tests {
         }
         let index = Index::open(root).unwrap();
         index.rebuild(root).unwrap();
-        let stats = collect(root, &index, &HashMap::new()).unwrap();
+        let stats = collect(root, &index, &HashMap::new(), None).unwrap();
 
         assert_eq!(stats.largest_notes.len(), TOP_N);
         assert_eq!(stats.largest_notes[0].path, "n14.md");
@@ -594,6 +625,34 @@ mod tests {
             .all(|w| w[0].bytes >= w[1].bytes));
         // Notes never appear in largestFiles, even though they are bigger.
         assert!(stats.largest_files.iter().all(|f| !f.path.ends_with(".md")));
+    }
+
+    #[test]
+    fn days_are_cut_at_the_callers_midnight() {
+        let now = 100 * DAY_MS + 10 * 60 * 60 * 1000; // 10:00 on day 100
+        let midnight = 100 * DAY_MS;
+        let at = |ms: i64, name: &str| SizedFile {
+            path: format!("{name}.md"),
+            bytes: 1,
+            mtime: ms,
+        };
+        let notes = vec![
+            at(now - 60_000, "today"),
+            at(midnight - 10 * 60 * 1000, "late-yesterday"), // 23:50 the day before
+            at(midnight - DAY_MS, "yesterday-midnight"),      // exactly 00:00 yesterday
+            at(midnight - 3 * DAY_MS + 1, "three-days-ago"),
+            at(midnight - 400 * DAY_MS, "ancient"),
+        ];
+        let a = activity_from(&notes, now, Some(midnight));
+        assert_eq!(a.days.len(), ACTIVITY_DAYS);
+        assert_eq!(a.days[ACTIVITY_DAYS - 1], 1, "today");
+        assert_eq!(a.days[ACTIVITY_DAYS - 2], 2, "both yesterday stamps");
+        assert_eq!(a.days[ACTIVITY_DAYS - 4], 1, "three days ago");
+        assert_eq!(a.days.iter().sum::<i64>(), 4, "the ancient one is off the grid");
+        // Without a midnight the split is a rolling 24h window from now: the
+        // 23:50 edit is then inside "today".
+        let rolling = activity_from(&notes, now, None);
+        assert_eq!(rolling.days[ACTIVITY_DAYS - 1], 2);
     }
 
     #[test]
@@ -616,7 +675,7 @@ mod tests {
                 mtime: now + DAY_MS, // clock skew clamps into the newest bucket
             },
         ];
-        let activity = activity_from(&notes, now);
+        let activity = activity_from(&notes, now, None);
 
         assert_eq!(activity.weeks.len(), ACTIVITY_WEEKS);
         assert_eq!(activity.modified_last7d, 3, "0d, 3d and the future file");
@@ -634,7 +693,7 @@ mod tests {
         let (tmp, index) = fixture();
         let alpha = doc_id_of(&index, "Alpha.md");
         index.append_yjs_update(&alpha, &[0u8; 8]).unwrap();
-        let json = serde_json::to_value(collect(tmp.path(), &index, &HashMap::new()).unwrap()).unwrap();
+        let json = serde_json::to_value(collect(tmp.path(), &index, &HashMap::new(), None).unwrap()).unwrap();
 
         for key in [
             "computedAt",
@@ -662,7 +721,7 @@ mod tests {
         for key in ["docs", "updates", "bytes", "orphanDocs", "orphanBytes"] {
             assert!(json["history"].get(key).is_some(), "history is missing {key}");
         }
-        for key in ["modifiedLast7d", "modifiedLast30d", "weeks"] {
+        for key in ["modifiedLast7d", "modifiedLast30d", "weeks", "days"] {
             assert!(json["activity"].get(key).is_some(), "activity is missing {key}");
         }
         for key in ["path", "bytes", "mtime"] {
@@ -684,7 +743,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let index = Index::open(tmp.path()).unwrap();
         index.rebuild(tmp.path()).unwrap();
-        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new(), None).unwrap();
 
         assert_eq!(stats.notes.count, 0);
         assert_eq!(stats.folders, 0);
@@ -699,7 +758,7 @@ mod tests {
     #[test]
     fn the_context_dir_is_never_counted() {
         let (tmp, index) = fixture();
-        let stats = collect(tmp.path(), &index, &HashMap::new()).unwrap();
+        let stats = collect(tmp.path(), &index, &HashMap::new(), None).unwrap();
         let every_path: Vec<&str> = stats
             .largest_notes
             .iter()

@@ -95,7 +95,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       liveDocs[docId] = path;
     }
     void ipc
-      .vaultStats(liveDocs, vaultEpoch)
+      .vaultStats(liveDocs, vaultEpoch, new Date().setHours(0, 0, 0, 0))
       .then((s) => {
         if (!live) return;
         setStats(s);
