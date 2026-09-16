@@ -266,20 +266,51 @@ jobs:
 
       # The GitHub release body doubles as the in-app "what's new": the updater
       # feeds it back as latest.json's `notes`, and the desktop shows those
-      # one-liners in the post-update banner. Keep docs/RELEASE_NOTES.md fresh
-      # alongside every version bump; the fallback keeps releases shippable if
-      # it's ever missing.
+      # points in the What's New modal on the first launch after the update.
+      #
+      # docs/RELEASE_NOTES.md is per-version: `## <version>` sections, newest
+      # first, each holding 2–5 combined points. We ship ONLY the section whose
+      # heading matches the version being released — `cat`ting the whole file
+      # was how every update ended up showing a dozen notes from releases the
+      # user had already installed. Two fallbacks keep a release shippable: an
+      # unmatched version falls back to the topmost section (someone forgot to
+      # rename the heading), and a missing file to the one-line placeholder.
+      #
+      # The leading HTML comment (the authoring rules) is stripped, and the
+      # `## <version>` heading line itself is not emitted — GitHub already
+      # titles the release, and the desktop's note parser drops `#` lines.
       - name: Release notes
         id: relnotes
         shell: bash
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
         run: |
+          if [ -f docs/RELEASE_NOTES.md ]; then
+            body=$(awk -v ver="$VERSION" '
+              function emit(arr, n,   i, a, b) {
+                a = 1; while (a <= n && arr[a] ~ /^[ \t]*$/) a++
+                b = n; while (b >= a && arr[b] ~ /^[ \t]*$/) b--
+                for (i = a; i <= b; i++) print arr[i]
+              }
+              BEGIN { want = "## " ver }
+              incomment { if (index($0, "-->")) incomment = 0; next }
+              index($0, "<!--") { if (!index($0, "-->")) incomment = 1; next }
+              /^##[ \t]/ { nsec++; cur = ($0 == want) ? 2 : (nsec == 1 ? 1 : 0); next }
+              cur == 1 { first[++nfirst] = $0 }
+              cur == 2 { hit[++nhit] = $0 }
+              END { if (nhit > 0) emit(hit, nhit); else emit(first, nfirst) }
+            ' docs/RELEASE_NOTES.md)
+          else
+            body=''
+          fi
+          if [ -z "$body" ]; then
+            body='See the assets below to download and install this version.'
+          fi
+          echo "Release notes for v$VERSION:"
+          echo "$body"
           {
             echo 'body<<RELNOTES_EOF'
-            if [ -f docs/RELEASE_NOTES.md ]; then
-              cat docs/RELEASE_NOTES.md
-            else
-              echo 'See the assets below to download and install this version.'
-            fi
+            echo "$body"
             echo 'RELNOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 
