@@ -22,6 +22,40 @@ use state::AppState;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Open the main window at a size that suits the screen it lands on: about
+/// 86% × 88% of the monitor's work area, centered, never smaller than the
+/// 1200×800 in `tauri.conf.json` unless the screen itself is, and capped so a
+/// 5K display does not get a 4,000-pixel-wide editor. The config's fixed
+/// 1200×800 was right for a laptop and opened as a small box in the middle of
+/// a 27" display. Logical pixels throughout, so Retina scaling is handled.
+#[cfg(desktop)]
+fn fit_window_to_screen(win: &tauri::WebviewWindow) {
+    let monitor = match win.current_monitor() {
+        Ok(Some(m)) => Some(m),
+        _ => win.primary_monitor().ok().flatten(),
+    };
+    let Some(monitor) = monitor else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    if scale <= 0.0 {
+        return;
+    }
+    let area = monitor.work_area();
+    let avail_w = area.size.width as f64 / scale;
+    let avail_h = area.size.height as f64 / scale;
+    let floor_w = 1200.0_f64.min(avail_w);
+    let floor_h = 800.0_f64.min(avail_h);
+    let w = (avail_w * 0.86).clamp(floor_w, 2000.0_f64.max(floor_w));
+    let h = (avail_h * 0.88).clamp(floor_h, 1400.0_f64.max(floor_h));
+    if let Err(e) = win.set_size(tauri::LogicalSize::new(w, h)) {
+        log::warn!("[window] could not size the window to the screen: {e}");
+        return;
+    }
+    let _ = win.center();
+    log::info!("[window] sized to {w:.0}×{h:.0} on a {avail_w:.0}×{avail_h:.0} work area");
+}
+
 pub fn run() {
     let builder = tauri::Builder::default();
 
@@ -124,6 +158,9 @@ pub fn run() {
             // visible window is a no-op, so this needs no coordination.
             #[cfg(desktop)]
             if let Some(win) = app.get_webview_window("main") {
+                // While it is still hidden, so the first frame is already the
+                // right size — resizing after reveal would visibly jump.
+                fit_window_to_screen(&win);
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(1500));
                     if win.is_visible().unwrap_or(false) {
