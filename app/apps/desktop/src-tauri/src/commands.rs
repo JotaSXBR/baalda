@@ -11,6 +11,7 @@ use crate::index::{
 };
 use crate::notefile;
 use crate::state::AppState;
+use crate::stats::{self, VaultStats};
 use crate::tree::{self, TreeNode};
 use crate::{vault, watcher};
 use serde::{Deserialize, Serialize};
@@ -1854,6 +1855,23 @@ pub async fn list_attachments(
 ) -> AppResult<Vec<AttachmentMeta>> {
     let (vault, _) = require_vault_at(&state, expected_epoch)?;
     attachments::list_attachments(&vault)
+}
+
+/// A one-shot census of the open vault for Vault Settings → Health: what is in
+/// it, what the local CRDT store costs, and what is recently touched. See
+/// `stats.rs` for the ignore rules and `src/lib/health/types.ts` for the shape.
+///
+/// Epoch-pinned like `list_note_titles`: the page reports paths and doc_ids, and
+/// a census that crossed a vault switch would describe the wrong vault's disk.
+/// One walk plus four aggregate queries; it reads no file contents.
+#[tauri::command]
+pub async fn vault_stats(
+    state: State<'_, AppState>,
+    expected_epoch: Option<u64>,
+) -> AppResult<VaultStats> {
+    let (vault, index) = require_vault_at(&state, expected_epoch)?;
+    let guard = index.lock().unwrap();
+    stats::collect(&vault, &guard)
 }
 
 /// Read an arbitrary host file the user just dropped/picked (absolute path).

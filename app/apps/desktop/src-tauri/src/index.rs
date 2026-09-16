@@ -1607,6 +1607,78 @@ impl Index {
         Ok(())
     }
 
+    // ---- Vault census (Vault Settings → Health) ---------------------------
+    //
+    // Four aggregate reads behind `stats::collect`. Deliberately queries, not
+    // row dumps: the Health page wants totals, and a vault with 90 000 link
+    // rows must not ship them through the IPC boundary to be counted in TS.
+
+    /// Every note's `(doc_id, path)`, for the census's file classifier: a file
+    /// on disk is a *note* exactly when its vault-relative path is a row here.
+    /// Lighter than `list_note_titles` (no title column, no ORDER BY), which is
+    /// what makes it cheap enough to call on a several-thousand-note vault.
+    pub fn note_paths(&self) -> AppResult<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT id, path FROM notes")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// How many distinct `#tag` names the index holds.
+    ///
+    /// `tags` rows outlive the last note that used them (see `list_tags`), so
+    /// this is "tags this vault knows about", which is exactly what the tag
+    /// completion list shows — the two numbers agree by construction.
+    pub fn tag_count(&self) -> AppResult<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tags", [], |r| r.get(0))?)
+    }
+
+    /// Wikilinks split by whether they found a note. `dst_note_id IS NULL` is
+    /// how `resolve_links` records a link it could not resolve, so the broken
+    /// half is the vault's dangling `[[…]]` references.
+    pub fn link_counts(&self) -> AppResult<LinkCounts> {
+        let (resolved, broken) = self.conn.query_row(
+            "SELECT COUNT(dst_note_id), COUNT(*) - COUNT(dst_note_id) FROM links",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        )?;
+        Ok(LinkCounts { resolved, broken })
+    }
+
+    /// Per-doc CRDT footprint: update-log rows and the bytes of the log plus the
+    /// snapshot. Unsorted — the caller ranks and joins against `notes`.
+    ///
+    /// A doc that has only a *state vector* (the NULL-snapshot row
+    /// `save_yjs_state_vectors` writes for the sync manifest) is deliberately
+    /// absent: it carries neither an update nor a snapshot, so counting it would
+    /// report history the vault does not actually store.
+    pub fn history_footprints(&self) -> AppResult<Vec<DocHistory>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT doc_id, SUM(updates) AS updates, SUM(bytes) AS bytes FROM (
+                 SELECT doc_id,
+                        COUNT(*) AS updates,
+                        COALESCE(SUM(LENGTH(\"update\")), 0) AS bytes
+                   FROM yjs_updates
+                  WHERE doc_id IS NOT NULL
+                  GROUP BY doc_id
+                 UNION ALL
+                 SELECT doc_id, 0 AS updates, LENGTH(snapshot) AS bytes
+                   FROM yjs_snapshot
+                  WHERE doc_id IS NOT NULL AND snapshot IS NOT NULL
+             )
+             GROUP BY doc_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(DocHistory {
+                doc_id: r.get(0)?,
+                updates: r.get(1)?,
+                bytes: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// `VACUUM` the index, returning the bytes the file gave back.
     ///
     /// Deleting rows only frees SQLite *pages*, which the file keeps. After a
@@ -1636,6 +1708,23 @@ impl Index {
             .unwrap_or(0);
         page_count * page_size
     }
+}
+
+/// Resolved vs dangling wikilinks — see [`Index::link_counts`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LinkCounts {
+    pub resolved: i64,
+    pub broken: i64,
+}
+
+/// One doc's raw CRDT footprint in the local store — see
+/// [`Index::history_footprints`]. Not serialized: `stats.rs` joins it against
+/// `notes` and turns it into the `HistoryFootprint` the UI sees.
+#[derive(Debug, Clone)]
+pub struct DocHistory {
+    pub doc_id: String,
+    pub updates: i64,
+    pub bytes: i64,
 }
 
 /// What one {@link Index::prune_yjs_docs} pass removed.
