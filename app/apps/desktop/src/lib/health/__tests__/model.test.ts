@@ -467,6 +467,19 @@ describe("unregistered notes", () => {
     expect(r.detail).toContain(`first 50 of ${num(n)}`);
   });
 
+  it("says nothing while the server has not answered — the reason is the connection", () => {
+    for (const syncStatus of ["offline", "connecting", "error"] as const) {
+      const r = buildHealthReport(
+        input({
+          ...unmapped(18),
+          syncStatus,
+          syncProgress: { phase: "done", done: 0, total: 0, failed: 0 },
+        }),
+      );
+      expect(r.issues.filter((i) => i.kind === "unregistered")).toHaveLength(0);
+    }
+  });
+
   it("says nothing when signed out — the reason is the session, not the notes", () => {
     const r = buildHealthReport(
       input({ ...unmapped(3), authStatus: "signed-out", hasSession: false }),

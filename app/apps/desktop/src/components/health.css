@@ -521,6 +521,35 @@
   margin: 2px 0 0;
 }
 
+/* App.css styles every `.settings-page input:not([type="range"])` as a text
+   field — `width: 100%`, padding, a filled background. A checkbox caught by
+   that rule became a full-width invisible box, which shoved each issue row's
+   content into a sliver at the right edge and made the page scroll sideways.
+   (0,3,1) outranks that (0,2,1). */
+.settings-page .health-tab input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  box-shadow: none;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+/* Nothing on this page may widen the settings card: long paths, wide tables
+   and the timeline all clip or wrap inside their own boxes instead. */
+.health-tab {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: clip;
+}
+.health-issue-main > * {
+  min-width: 0;
+  max-width: 100%;
+}
 .health-issues {
   margin: 0;
   padding: 0;

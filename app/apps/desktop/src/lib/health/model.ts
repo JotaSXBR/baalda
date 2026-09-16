@@ -872,8 +872,19 @@ function buildIssues(
   // NOT in a bulk phase: during registration every unmapped note is simply
   // in-flight, and warning about it would turn a working vault into a wall of
   // alarms for as long as the pass takes.
+  //
+  // And only once the server has ANSWERED this session. Offline, every unmapped
+  // note is unmapped for the same single reason — nobody could register it —
+  // so eighteen "Not on the server yet" rows say nothing the verdict's
+  // "Offline" does not, and read as eighteen problems. Same rule as the
+  // sidebar's dots (`sidebarMarksVisible`).
   let unregisteredTotal = 0;
-  if (input.syncEnabled && ctx.signedIn && !ctx.bulk && input.syncStatus !== "no-access") {
+  const serverAnswered =
+    input.syncStatus !== "offline" &&
+    input.syncStatus !== "connecting" &&
+    input.syncStatus !== "error" &&
+    input.syncStatus !== "no-access";
+  if (input.syncEnabled && ctx.signedIn && !ctx.bulk && serverAnswered) {
     const failedPaths = new Set<string>([
       ...input.failures.registry.map((f) => f.path),
       ...input.failures.content.map((f) => f.relPath),
