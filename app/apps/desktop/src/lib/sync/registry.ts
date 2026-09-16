@@ -1014,9 +1014,11 @@ export class VaultRegistry {
     // The registry's OWN map answers first, and it has to: a note this device
     // MATERIALIZED from the server got its file written by `writeNoteIfMissing`,
     // and Rust's indexer mints a fresh local UUID for any file it hasn't seen
-    // before. That local id never equals the server's `doc_id` — `byPath` is the
-    // only place the two identities are joined (see viewingDocId.ts, which says
-    // the same thing for presence).
+    // before. The materialize step now rebinds that row to the server's id
+    // straight away (#147), but every note materialized by an older build still
+    // carries the fork, so `byPath` remains the only place the two identities
+    // are reliably joined (see viewingDocId.ts, which says the same thing for
+    // presence).
     //
     // Keying this map on index ids alone therefore made every remote delete of a
     // materialized note a no-op: `local.get(serverDocId)` came back undefined, the
@@ -2137,7 +2139,52 @@ export class VaultRegistry {
             // Remember it for one watcher echo, so the sync layer does not treat
             // our own placeholder as an external edit worth pushing.
             this.markMaterialized(rp);
+            // The mapping is already in `byPath`: step 3 registered/adopted
+            // every server note above, and `toMaterialize` is a subset of that
+            // same resolved server listing. No config.json re-read needed.
             const docId = this.byPath.get(rp)?.docId ?? null;
+            // Put the SERVER's doc_id on the row Rust just indexed, BEFORE
+            // anything can open the note.
+            //
+            // `writeNoteIfMissing` re-indexes synchronously, and `index_one`
+            // reuses an id only via `id_for_path` — a path Rust has never seen
+            // gets a FRESH `Uuid::new_v4()`. Without this rebind the note
+            // carries two identities for the rest of its life: `Editor.tsx`
+            // keys its bridge by the INDEX id (`ipc.getNoteMeta`) while
+            // `syncManager.openDoc` / `vaultDocStore` key `DocSync` by the
+            // registry's SERVER id — two Y.Docs, two local CRDT logs, one file
+            // (#147). Every teammate who joins a shared vault got this for
+            // every note they didn't already have.
+            //
+            // Safe here specifically because the row is one pass old and holds
+            // no CRDT: `rebind_note_id` re-keys `notes`/`note_tags`/`links` and
+            // re-resolves backlinks, but deliberately does NOT touch
+            // `yjs_updates`/`yjs_snapshot` — with nothing there yet that is a
+            // clean no-op rather than a stranded log. It also refuses (false,
+            // never a merge) when the id already belongs to a DIFFERENT path,
+            // so a stale row from an earlier run cannot break the UNIQUE path
+            // constraint or fork the note; we simply keep today's behaviour.
+            //
+            // Before `materializeContent`, which promotes a bridge under the
+            // server id and writes through it — that write re-indexes, and
+            // `id_for_path` then preserves the id we just bound.
+            if (docId) {
+              try {
+                const rebound = await ipc.rebindNoteId(rp, docId, this.epoch());
+                if (!rebound) {
+                  console.warn(`[registry] couldn't rebind ${rp} to ${docId} (id taken?)`);
+                }
+              } catch (e) {
+                // Never abort the pull for this: the old behaviour (a note with
+                // a local-only index id) is the fallback, and it is what every
+                // build before this one did.
+                if (!ipc.isVaultMismatch(e)) {
+                  console.warn(`[registry] rebinding ${rp} to ${docId} failed`, e);
+                } else {
+                  return; // the vault moved on
+                }
+              }
+            }
             // Fill it in from local CRDT when this device has it. Best effort: a
             // failure leaves today's 0-byte placeholder, which is exactly the
             // current behaviour, so this can never make things worse.

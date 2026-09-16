@@ -8,6 +8,8 @@ vi.mock("../../ipc", () => ({
   listNoteTitles: vi.fn(async () => []),
   writeNote: vi.fn(async () => {}),
   writeNoteIfMissing: vi.fn(async () => true),
+  rebindNoteId: vi.fn(async () => true),
+  isVaultMismatch: () => false,
 }));
 vi.mock("../../vault/seed", () => ({ seedWelcomeContent: vi.fn(async () => {}) }));
 
@@ -55,6 +57,7 @@ beforeEach(() => {
   vi.mocked(ipc.getVaultConfig).mockResolvedValue(null);
   vi.mocked(ipc.writeNote).mockClear();
   vi.mocked(ipc.writeNoteIfMissing).mockClear().mockResolvedValue(true);
+  vi.mocked(ipc.rebindNoteId).mockClear().mockResolvedValue(true);
   vi.mocked(seedWelcomeContent).mockClear();
 });
 
@@ -373,6 +376,85 @@ describe("VaultRegistry.reconcile — seeding and materialization rules", () => 
     // verdict cost nothing — and only then the content.
     expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("Deleted.md", "", null);
     expect(hydrated).toEqual([{ docId: "n1", path: "Deleted.md" }]);
+  });
+
+  // ── Materialized notes keep the SERVER's doc_id (#147) ────────────────────
+  // `writeNoteIfMissing` re-indexes synchronously and Rust mints a FRESH uuid
+  // for a path it has never seen, so without a rebind the note carries two
+  // identities forever: the editor's bridge keys by the index id and `DocSync`
+  // keys by the server id — two Y.Docs, two local CRDT logs, one file. Every
+  // teammate joining a shared vault got that for every note they didn't have.
+
+  it("rebinds a freshly materialized note to the server's doc_id, before hydrating", async () => {
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Team/joined.md" }],
+    });
+    const order: string[] = [];
+    vi.mocked(ipc.rebindNoteId).mockImplementation(async () => {
+      order.push("rebind");
+      return true;
+    });
+    const reg = new VaultRegistry(api);
+    reg.setInboundHost({
+      releaseDoc: async () => {},
+      notePathChanged: () => {},
+      noteRemoved: () => {},
+      materializeContent: async () => {
+        order.push("hydrate");
+        return true;
+      },
+    });
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    expect(vi.mocked(ipc.rebindNoteId)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(ipc.rebindNoteId)).toHaveBeenCalledWith("Team/joined.md", "n1", null);
+    // Identity first: `materializeContent` promotes a bridge under the server
+    // id and writes through it, and that write re-indexes — the id must already
+    // be bound or `id_for_path` preserves the fork instead.
+    expect(order).toEqual(["rebind", "hydrate"]);
+  });
+
+  it("does not rebind a path that already held a file", async () => {
+    // The create-only guard said no: the row there belongs to a real local note
+    // whose identity is none of this pass's business.
+    vi.mocked(ipc.writeNoteIfMissing).mockResolvedValue(false);
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Mine.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    expect(vi.mocked(ipc.writeNoteIfMissing)).toHaveBeenCalledWith("Mine.md", "", null);
+    expect(vi.mocked(ipc.rebindNoteId)).not.toHaveBeenCalled();
+  });
+
+  it("a failed rebind is logged, not fatal — the pull carries on", async () => {
+    // Falling back to the pre-#147 behaviour (a note with a local-only index id)
+    // is strictly better than abandoning the note, or the whole pass.
+    vi.mocked(ipc.rebindNoteId).mockRejectedValue(new Error("id taken"));
+    const { api } = fakeApi({
+      vaults: [{ id: "v1", name: "laptop", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Team/joined.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    const hydrated: string[] = [];
+    reg.setInboundHost({
+      releaseDoc: async () => {},
+      notePathChanged: () => {},
+      noteRemoved: () => {},
+      materializeContent: async (_docId, path) => {
+        hydrated.push(path);
+        return true;
+      },
+    });
+
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "laptop" }, emptyTree());
+
+    expect(hydrated).toEqual(["Team/joined.md"]);
+    expect(reg.hasFailures()).toBe(false);
   });
 
   it("does not ask for content when the file was already there", async () => {
