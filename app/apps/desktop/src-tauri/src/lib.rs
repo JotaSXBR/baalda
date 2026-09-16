@@ -32,20 +32,57 @@ pub fn run() {
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|_app, _argv, _cwd| {}));
 
-    // The UI's own log, on the dev terminal. A `console.log` inside a WKWebView
-    // goes to the Web Inspector and nowhere else, so anything the React layer
-    // measures about itself is invisible to whoever is reading `tauri dev` —
-    // which is how two wrong diagnoses of "the sidebar blinks while it syncs"
-    // survived as long as they did. The frontend's `@tauri-apps/plugin-log`
-    // calls land on stdout next to the Rust ones, so both halves of a symptom
-    // read as one timeline. Debug builds only; a shipped app logs nothing new.
+    // The UI's own log. A `console.log` inside a WKWebView goes to the Web
+    // Inspector and nowhere else, so anything the React layer measures about
+    // itself is invisible to whoever is reading `tauri dev` — which is how two
+    // wrong diagnoses of "the sidebar blinks while it syncs" survived as long as
+    // they did. The frontend's `@tauri-apps/plugin-log` calls land next to the
+    // Rust ones, so both halves of a symptom read as one timeline.
+    //
+    // Note `targets()`, not `target()`: the latter APPENDS to the plugin's
+    // defaults (Stdout + LogDir), so the old `.target(Stdout)` here was really
+    // "stdout twice, plus a file" rather than the stdout-only it reads as.
+    //
+    // Debug: the terminal, which is where a developer already is.
     #[cfg(debug_assertions)]
     let builder = builder.plugin(
         tauri_plugin_log::Builder::new()
             .level(log::LevelFilter::Info)
-            .target(tauri_plugin_log::Target::new(
+            .targets([tauri_plugin_log::Target::new(
                 tauri_plugin_log::TargetKind::Stdout,
-            ))
+            )])
+            .build(),
+    );
+
+    // Release: a rotating FILE, because a shipped app's stdout goes nowhere —
+    // on Windows there is no console attached at all. Without it, a user whose
+    // vault refused to open (#128) had nothing to send us but a screenshot of
+    // the dialog, and the errors that matter most are the ones that happen on
+    // machines we cannot reproduce.
+    //
+    //   macOS   ~/Library/Logs/com.baalda.context/baalda.log
+    //   Windows %LOCALAPPDATA%\com.baalda.context\logs\baalda.log
+    //   Linux   ~/.local/share/com.baalda.context/logs/baalda.log
+    //
+    // Bounded on purpose: 2 MB per file, KeepOne (the rotated file replaces the
+    // previous one), so the app can never cost more than ~4 MB of disk here. At
+    // `Info` this is app lifecycle plus every warn/error — including the
+    // `io_ctx` failures from error.rs, which log themselves on the way to the
+    // UI, so a failed open is in the file whether or not the user reports it.
+    #[cfg(not(debug_assertions))]
+    let builder = builder.plugin(
+        tauri_plugin_log::Builder::new()
+            .level(log::LevelFilter::Info)
+            .max_file_size(2_000_000)
+            .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+            .targets([
+                // Kept so `open -a Baalda` / a terminal launch still shows the
+                // same lines live; it is a no-op where nothing is attached.
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                    file_name: Some("baalda".into()),
+                }),
+            ])
             .build(),
     );
 

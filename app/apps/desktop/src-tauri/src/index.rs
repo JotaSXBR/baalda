@@ -7,7 +7,7 @@
 //! forks a note's identity. On rename we update the path column by id, so
 //! inbound links (which store `dst_note_id`) never break.
 
-use crate::error::{AppError, AppResult};
+use crate::error::{io_ctx, AppError, AppResult};
 use crate::notefile::sha256_hex;
 use crate::parse::parse_note;
 use crate::vault::{is_ignored_name, rel_from_abs};
@@ -137,9 +137,19 @@ impl Index {
     /// Open (creating if needed) the index at `<vault>/.context/index.sqlite`.
     pub fn open(vault: &Path) -> AppResult<Self> {
         let context_dir = vault.join(".context");
-        std::fs::create_dir_all(&context_dir)?;
+        // Named + logged rather than a bare `?`: this is one of the three I/O
+        // calls that can fail an open with "The system cannot find the file
+        // specified. (os error 2)" and, until #128, the only way to tell them
+        // apart was to guess.
+        std::fs::create_dir_all(&context_dir)
+            .map_err(io_ctx("create the folder", &context_dir))?;
         let db_path = context_dir.join("index.sqlite");
-        let conn = Connection::open(db_path)?;
+        let conn = Connection::open(&db_path).map_err(|e| {
+            AppError::new(format!(
+                "Couldn't open the index at {}: {e}",
+                db_path.display()
+            ))
+        })?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Wait up to 5s for a contended lock instead of failing immediately with

@@ -3,7 +3,7 @@
 //! the UI never touches the filesystem directly.
 
 use crate::attachments::{self, AttachmentMeta};
-use crate::error::{AppError, AppResult};
+use crate::error::{io_ctx, AppError, AppResult};
 use crate::import_export::{self, ImportSummary};
 use crate::index::{
     Backlink, GraphEdge, Index, NoteMeta, NoteTitle, ResolvedLink, SearchResult, YjsPruneReport,
@@ -160,25 +160,101 @@ fn require_vault_at(
 /// `app_config_dir()` + `create_dir_all` is a syscall pair, and it used to be
 /// charged on every single `read_config` — thirteen-plus times per launch, for a
 /// directory that exists after the first one.
+///
+/// **Fallback (#128).** On Windows `app_config_dir()` is under `%APPDATA%` — the
+/// *roaming* profile, and therefore precisely the directory a redirected/roaming
+/// profile or a OneDrive Known Folder Move can point somewhere this process
+/// cannot create or write under. A failure there used to abort the whole vault
+/// open with an unattributed "The system cannot find the file specified.
+/// (os error 2)". So when it is unusable we fall back to `app_local_data_dir()`
+/// (`%LOCALAPPDATA%\<bundle id>` on Windows — never roamed, never redirected by
+/// KFM; `~/Library/Application Support/<bundle id>` on macOS,
+/// `$XDG_DATA_HOME/<bundle id>` on Linux).
+///
+/// Deliberately NOT the vault's own `.context/`, the other obvious candidate:
+/// this file holds the recents list, the server URL and the vaults root, it has
+/// to be readable BEFORE any vault is open (that is how the app decides which
+/// vault to open), and `.context/config.json` is already a *different*,
+/// vault-scoped file that travels with the vault — putting account-shaped state
+/// there would sync it to whoever the folder is shared with.
+///
+/// Both paths are logged, and if neither works the contextual error is returned
+/// rather than the config being silently dropped.
 fn config_path(app: &AppHandle) -> AppResult<PathBuf> {
     static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     if let Some(p) = PATH.get() {
         return Ok(p.clone());
     }
-    let dir = app
+    let primary = app
         .path()
         .app_config_dir()
-        .map_err(|e| AppError::new(format!("no config dir: {e}")))?;
-    std::fs::create_dir_all(&dir)?;
-    Ok(PATH.get_or_init(|| dir.join("config.json")).clone())
+        .map_err(|e| AppError::new(format!("Couldn't locate the settings folder: {e}")));
+    let primary_err = match &primary {
+        Ok(dir) => match prepare_config_dir(dir) {
+            Ok(()) => return Ok(PATH.get_or_init(|| dir.join("config.json")).clone()),
+            Err(e) => e.to_string(),
+        },
+        Err(e) => e.to_string(),
+    };
+    // Loud, because the app is now keeping its settings somewhere the user (and
+    // the next person debugging this) would not look first.
+    log::warn!("[config] the settings folder is unusable ({primary_err}) — falling back to the local app-data folder");
+    let fallback = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| AppError::new(format!("Couldn't locate the local app-data folder: {e}")))?;
+    prepare_config_dir(&fallback)
+        .map_err(|e| AppError::new(format!("{primary_err} — and the fallback failed too: {e}")))?;
+    log::warn!(
+        "[config] using the fallback settings folder {}",
+        fallback.display()
+    );
+    Ok(PATH.get_or_init(|| fallback.join("config.json")).clone())
+}
+
+/// Create `dir` and prove a file can actually be written in it.
+///
+/// `create_dir_all` returning Ok is not the same as the directory being usable —
+/// a redirected profile or an offline network home can hand back a path that
+/// exists and refuses writes — and the point of the fallback above is to find
+/// that out once, at resolve time, rather than on the first `write_config`,
+/// which happens in the middle of a vault open.
+fn prepare_config_dir(dir: &Path) -> AppResult<()> {
+    std::fs::create_dir_all(dir).map_err(io_ctx("create the settings folder", dir))?;
+    let probe = dir.join(".write-test");
+    std::fs::write(&probe, b"").map_err(io_ctx("write to the settings folder", dir))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
 fn load_config_from_disk(app: &AppHandle) -> AppConfig {
-    config_path(app)
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    // Every failure here silently costs the user their recents, server URL and
+    // vaults root, so each one says so in the log rather than defaulting mutely.
+    let path = match config_path(app) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("[config] no settings file ({e}) — using defaults for this session");
+            return AppConfig::default();
+        }
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+            log::warn!(
+                "[config] {} is not readable JSON ({e}) — using defaults",
+                path.display()
+            );
+            AppConfig::default()
+        }),
+        // First launch: nothing written yet. Not a problem, not worth a line.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => AppConfig::default(),
+        Err(e) => {
+            log::warn!(
+                "[config] couldn't read {} ({e}) — using defaults",
+                path.display()
+            );
+            AppConfig::default()
+        }
+    }
 }
 
 /// The app config, from `AppState`'s cache after the first read (see
@@ -194,7 +270,8 @@ fn read_config(app: &AppHandle, state: &State<AppState>) -> AppConfig {
 
 fn write_config(app: &AppHandle, state: &State<AppState>, cfg: &AppConfig) -> AppResult<()> {
     let p = config_path(app)?;
-    std::fs::write(p, serde_json::to_string_pretty(cfg)?)?;
+    std::fs::write(&p, serde_json::to_string_pretty(cfg)?)
+        .map_err(io_ctx("write the settings file", &p))?;
     *state.config.lock().unwrap() = Some(cfg.clone());
     Ok(())
 }
@@ -256,9 +333,26 @@ pub async fn get_vault_epoch(state: State<'_, AppState>) -> AppResult<u64> {
 
 /// Open a vault: build/refresh its index, start the watcher, remember it, and
 /// emit `vault-opened`. Shared by `pick_vault` and `open_vault`.
+///
+/// Thin wrapper over [`open_vault_impl`] so that EVERY failure of an open lands
+/// in the log with the folder that was being opened. This is the funnel both
+/// buttons of the vault-setup prompt come through, and in #128 a Windows user
+/// saw only "The system cannot find the file specified. (os error 2)" with no
+/// record anywhere of which step or which path produced it.
 fn open_vault_inner(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> AppResult<VaultInfo> {
+    let attempted = path.display().to_string();
+    open_vault_impl(app, state, path).map_err(|e| {
+        log::error!("[open_vault] failed for {attempted}: {e}");
+        e
+    })
+}
+
+fn open_vault_impl(app: &AppHandle, state: &State<AppState>, path: PathBuf) -> AppResult<VaultInfo> {
     if !path.is_dir() {
-        return Err(AppError::new("selected path is not a folder"));
+        return Err(AppError::new(format!(
+            "Couldn't open the folder {}: it isn't a folder (it may have been moved, renamed or deleted)",
+            path.display()
+        )));
     }
 
     // Grant the runtime fs scope for this vault (spec 01 §3). Rust does the I/O
@@ -555,7 +649,7 @@ pub async fn create_vault(
     }
     let dir = free_vault_dir(Path::new(&parent), name)
         .ok_or_else(|| AppError::new("a folder with that name already exists"))?;
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(&dir).map_err(io_ctx("create the folder", &dir))?;
     open_vault_inner(&app, &state, dir)
 }
 
@@ -614,7 +708,7 @@ fn default_vaults_root(app: &AppHandle) -> AppResult<PathBuf> {
     let home = app
         .path()
         .home_dir()
-        .map_err(|e| AppError::new(format!("no home dir: {e}")))?;
+        .map_err(|e| AppError::new(format!("Couldn't locate your home folder: {e}")))?;
     Ok(home.join("Documents").join(DEFAULT_ROOT_DIR_NAME))
 }
 
@@ -635,7 +729,10 @@ pub async fn get_vaults_root(
         }
     };
     let _ = write_config(&app, &state, &cfg);
-    std::fs::create_dir_all(&root)?;
+    // `Documents\Baalda Vaults` on a default install — and the second of the
+    // three #128 candidates, since a redirected/OneDrive-managed Documents is
+    // exactly the kind of place `create_dir_all` fails on.
+    std::fs::create_dir_all(&root).map_err(io_ctx("create the vaults folder", &root))?;
     Ok(root.to_string_lossy().to_string())
 }
 
@@ -648,7 +745,7 @@ pub async fn set_vaults_root(
     path: String,
 ) -> AppResult<()> {
     let p = PathBuf::from(&path);
-    std::fs::create_dir_all(&p)?;
+    std::fs::create_dir_all(&p).map_err(io_ctx("create the vaults folder", &p))?;
     let mut cfg = read_config(&app, &state);
     cfg.vaults_root = Some(p.to_string_lossy().to_string());
     write_config(&app, &state, &cfg)
@@ -666,7 +763,7 @@ pub async fn pick_vaults_root(
     let path = folder
         .into_path()
         .map_err(|e| AppError::new(format!("invalid folder: {e}")))?;
-    std::fs::create_dir_all(&path)?;
+    std::fs::create_dir_all(&path).map_err(io_ctx("create the vaults folder", &path))?;
     let mut cfg = read_config(&app, &state);
     cfg.vaults_root = Some(path.to_string_lossy().to_string());
     write_config(&app, &state, &cfg)?;
@@ -801,9 +898,15 @@ pub async fn open_vault_in_root(
 ) -> AppResult<VaultInfo> {
     let folder = PathBuf::from(&path);
     if create.unwrap_or(false) {
-        std::fs::create_dir_all(&folder)?;
+        // The first thing BOTH vault-setup buttons do ("Open a folder…" reaches
+        // here with the folder the user picked, "Start with an empty folder"
+        // with one under the vaults root) — so this is the first of the three
+        // places #128 could have been failing, and it now says which.
+        std::fs::create_dir_all(&folder).map_err(io_ctx("create the folder", &folder))?;
     } else if !folder.is_dir() {
-        return Err(AppError::new(format!("vault folder not found: {path}")));
+        return Err(AppError::new(format!(
+            "Couldn't find the vault folder {path} — it may have been moved, renamed or deleted"
+        )));
     }
     if let Some(root) = read_config(&app, &state).vaults_root {
         repoint_current(Path::new(&root), &folder);
@@ -1766,6 +1869,38 @@ pub async fn read_external_file(path: String) -> AppResult<tauri::ipc::Response>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The decision behind `config_path`'s fallback (#128). `config_path` itself
+    /// needs an `AppHandle`, so the part that is actually testable is the probe:
+    /// it must accept a directory it can create AND write in, and reject one it
+    /// cannot — otherwise the fallback either never fires or always does.
+    #[test]
+    fn prepare_config_dir_accepts_a_writable_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Nested, because `app_config_dir()` on a fresh install does not exist yet.
+        let dir = tmp.path().join("com.baalda.context");
+        prepare_config_dir(&dir).expect("a fresh writable dir must be usable");
+        assert!(dir.is_dir());
+        // The probe cleans up after itself — a `.write-test` left behind would
+        // sit next to the user's settings forever.
+        assert!(!dir.join(".write-test").exists());
+    }
+
+    #[test]
+    fn prepare_config_dir_rejects_a_path_blocked_by_a_file() {
+        // A FILE where the directory should be is the one unusable-path case
+        // that behaves the same on every platform (making a directory
+        // unwritable needs chmod, which is a no-op for root and absent on
+        // Windows — so that case is deliberately not tested here).
+        let tmp = tempfile::tempdir().unwrap();
+        let blocked = tmp.path().join("not-a-dir");
+        std::fs::write(&blocked, b"x").unwrap();
+        let err = prepare_config_dir(&blocked).unwrap_err().to_string();
+        // The whole point of the change: the message names the operation AND
+        // the path, so support can tell it from the other two os-error-2 sites.
+        assert!(err.starts_with("Couldn't create the settings folder "), "{err}");
+        assert!(err.contains("not-a-dir"), "{err}");
+    }
 
     /// A vault opened at a filesystem/drive root has no `file_name`; its label
     /// must fall back to the path itself, never the anonymous "vault".
