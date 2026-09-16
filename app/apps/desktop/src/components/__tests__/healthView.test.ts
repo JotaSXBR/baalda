@@ -209,7 +209,7 @@ describe("HealthView", () => {
     expect(html).toContain("Reclaim");
   });
 
-  it("draws the bar and the issue list for a synced vault", () => {
+  it("renders the issue list for a synced vault", () => {
     const html = render(
       snapshot({
         report: {
@@ -242,13 +242,9 @@ describe("HealthView", () => {
       }),
     );
     expect(html).toContain("Needs attention");
-    expect(html).toContain("health-bar-seg");
     // The legend chips are the only place these counts appear on screen; the
     // percentage is the bar's accessible name. Saying "6 of 10" above the chips
     // as well was the same number three times on one page.
-    expect(html).toContain("Synced");
-    expect(html).toContain('aria-label="60% synced — 6 of 10 notes"');
-    expect(html).not.toContain("60% of 10 notes confirmed");
     expect(html).toContain("Too large to sync");
     // The path is elided in the middle but kept whole in the tooltip.
     expect(html).toContain("…");

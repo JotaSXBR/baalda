@@ -138,24 +138,13 @@ export function HealthView({
 
   return (
     <div className="health-tab">
-      <VerdictCard snapshot={snapshot} onRefresh={refresh} loading={loading} />
+      <VerdictCard
+        snapshot={snapshot}
+        onRefresh={refresh}
+        loading={loading}
+        onGoToGeneral={onGoToGeneral}
+      />
 
-      {/* The bar first: it is the one-glance answer the verdict summarises,
-          and it belongs beside it rather than under the numbers. */}
-      <Section title="Sync">
-        {report.counts ? (
-          <SyncBreakdown counts={report.counts} />
-        ) : (
-          <div className="health-local-row">
-            <span className="muted">Sync is off for this folder.</span>
-            {onGoToGeneral && (
-              <button type="button" className="link-btn" onClick={onGoToGeneral}>
-                Turn on sync
-              </button>
-            )}
-          </div>
-        )}
-      </Section>
 
       {/* The vault's numbers sit right under the verdict as one quiet strip:
           they frame everything below ("15 notes, 259 KB") without competing
@@ -393,10 +382,13 @@ function VerdictCard({
   snapshot,
   onRefresh,
   loading,
+  onGoToGeneral,
 }: {
   snapshot: VaultHealthSnapshot;
   onRefresh: () => void;
   loading: boolean;
+  /** Where sync is turned on; a local vault's primary button leads there. */
+  onGoToGeneral?: () => void;
 }) {
   const { report, actions } = snapshot;
   const [copied, setCopied] = useState(false);
@@ -439,6 +431,12 @@ function VerdictCard({
             onClick={() => actions.requestSignIn()}
           >
             Sign in
+          </button>
+        ) : local && onGoToGeneral ? (
+          // A local folder has nothing to sync "now"; the useful button is the
+          // one that turns sync on, which lives on the General tab.
+          <button type="button" className="primary sm" onClick={onGoToGeneral}>
+            Turn on sync
           </button>
         ) : (
           <AsyncButton
@@ -564,60 +562,3 @@ export function Pipeline({ stages }: { stages: HealthStage[] }) {
 
 // ── Sync breakdown ────────────────────────────────────────────────────────────
 
-function SyncBreakdown({
-  counts,
-}: {
-  counts: NonNullable<VaultHealthSnapshot["report"]["counts"]>;
-}) {
-  const segments = [
-    { key: "synced", label: "Synced", value: counts.synced, tone: "good" },
-    { key: "pending", label: "Pending", value: counts.pending, tone: "busy" },
-    { key: "failed", label: "Failed", value: counts.failed, tone: "bad" },
-    { key: "unsynced", label: "Not on server", value: counts.unsynced, tone: "warn" },
-    // The fifth segment is what keeps the bar honest: a mapped note nobody has
-    // reported on yet is neither synced nor failed, and folding it into either
-    // would make the bar claim something the sync layer has not said.
-    { key: "unreported", label: "Unreported", value: counts.unreported, tone: "muted" },
-  ].filter((s) => s.value > 0);
-
-  // Widths come off the segments' own sum, not `total`, so the bar always fills
-  // its track even if the tallies disagree by a note.
-  const sum = segments.reduce((n, s) => n + s.value, 0);
-  // The percentage lives in the bar's accessible name only. On screen the
-  // legend chips already carry every number, and the verdict card above carries
-  // the sentence — a lead line here said "19" for the third time.
-  const pct = counts.total > 0 ? Math.floor((counts.synced / counts.total) * 100) : 100;
-
-  return (
-    <div className="health-breakdown">
-      <div
-        className="health-bar"
-        role="img"
-        aria-label={`${pct}% synced — ${counts.synced.toLocaleString()} of ${counts.total.toLocaleString()} notes`}
-      >
-        {sum === 0 ? (
-          <span className="health-bar-seg" data-tone="muted" style={{ width: "100%" }} />
-        ) : (
-          segments.map((s) => (
-            <span
-              key={s.key}
-              className="health-bar-seg"
-              data-tone={s.tone}
-              style={{ width: `${(s.value / sum) * 100}%` }}
-              title={`${s.label} · ${s.value.toLocaleString()}`}
-            />
-          ))
-        )}
-      </div>
-      <ul className="health-legend-list">
-        {segments.map((s) => (
-          <li key={s.key}>
-            <span className="health-swatch" data-tone={s.tone} aria-hidden="true" />
-            {s.label}
-            <strong>{s.value.toLocaleString()}</strong>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
