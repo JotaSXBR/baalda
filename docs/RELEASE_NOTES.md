@@ -24,12 +24,7 @@
 - Vault Settings has a new Health page: a verdict on your vault, a row per unsynced note with fixes you can press, fifteen checks over your files, and a year of activity as a grid. Warnings can be ignored.
 - The sync light tells the truth: no "Syncing" flash when you open or switch notes, no light stuck on Syncing after launch, and no grey dots or folder counters while you are offline.
 - Signing in is steadier: a banner warns you across the note when you are signed out, Windows and Linux stay signed in between launches, and edits made outside Baalda really do reach the server.
-- Baalda now opens sized to your screen instead of a small fixed window, notes use the full width by default, Mermaid diagrams render in place, and the tab bar has been tidied up.
-
-## 0.1.60
-
-- Fixed a crash that emptied the whole window when you opened a locked or view-only note and then clicked another. The editor is now walled off, so a failure there cannot take the app down.
-- The loading bars now appear the moment you click a note, instead of after it has already opened.
+- Fixed a crash that emptied the whole window when you opened a locked or view-only note and then clicked another; the editor is now walled off so a failure there cannot take the app down. Baalda also opens sized to your screen, notes use the full width by default, Mermaid diagrams render in place, and the loading bars appear the moment you click a note.
 
 ## 0.1.59
 
