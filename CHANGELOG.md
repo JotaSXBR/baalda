@@ -235,6 +235,11 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   so a refused credential stops the ladder instead of being retried.
 
 ### Changed
+- **Content width defaults to full** (`prefs.ts EDITOR_MEASURE_UNSET`). A device
+  with no stored choice — and a blank or unreadable value — reads `"full"`; a
+  stored measure is untouched, and the legacy "Readable line length" switch still
+  migrates (`off` → full, anything else → 88ch). `EDITOR_MEASURE_DEFAULT` (88)
+  stays the clamp's NaN fallback and the slider's readable stop.
 - **Main window sized to the screen on launch** (`lib.rs fit_window_to_screen`,
   before reveal so the first frame is already right): 79% × 88% of the current
   monitor's work area in logical pixels, centered, never below the config's

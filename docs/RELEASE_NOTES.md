@@ -1,3 +1,4 @@
+- Notes now use the full width of the window by default. If you prefer a narrower reading column, the Content width slider in Account Settings → Appearance still sets it, and a choice you already made is kept
 - Baalda now opens at a size that fits your screen — about four-fifths of the display, centered — instead of a fixed 1200×800 window that sat as a small box in the middle of a large monitor
 - The sidebar no longer shows a grey dot on every note and "0/6" on every folder while the app is offline. Those marks only mean something once the server has answered, so they now wait for it; the corner light already says "Offline"
 - Fixed the corner light staying on "Syncing" after launch when there was nothing left to sync. On a fast connection the server could finish handing over your notes before the app had finished checking the vault folder, and the app then waited for a signal that had already come and gone
