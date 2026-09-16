@@ -4881,6 +4881,26 @@ body:has(.sidebar-resizer.dragging) {
   cursor: pointer;
   user-select: none;
 }
+/* The settings-sized 40×24 switch is a control among controls there; next to
+   one line of 14px text under a field it read as a big grey pill, and its left
+   edge sat flush with the field's border while the field's text was inset. A
+   compact 32×18 track, indented to the field's text. */
+.auth-form-options {
+  padding: 0 var(--sp-2);
+}
+.auth-remember .switch {
+  width: 32px;
+  height: 18px;
+}
+.auth-remember .switch-knob {
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+}
+.auth-remember .switch.on .switch-knob {
+  transform: translateX(14px);
+}
 .auth-reset-lede {
   margin: 0;
   color: var(--text-secondary);
