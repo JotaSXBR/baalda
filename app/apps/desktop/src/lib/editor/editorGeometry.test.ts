@@ -127,6 +127,28 @@ describe("block replace widgets and the shared inset class", () => {
     view.destroy();
   });
 
+  it("gives a rendered mermaid diagram the inset class too", () => {
+    const view = mount(["Intro.", "", "```mermaid", "flowchart TD", "  A-->B", "```"].join("\n"));
+    const diagram = view.contentDOM.querySelector(".cm-md-mermaid")!;
+    expect(diagram).not.toBeNull();
+    expect(diagram.classList.contains("cm-block-inset")).toBe(true);
+    expect(diagram.parentElement).toBe(view.contentDOM);
+    view.destroy();
+  });
+
+  it("contains the diagram's paint, so leaked themeCSS cannot overlay the app", () => {
+    // Load-bearing, not cosmetic: `contain: paint` makes the host the
+    // containing block for any position:fixed/absolute descendant, so CSS that
+    // reached a diagram's <style> through a `%%{init: {themeCSS}}%%` directive
+    // (in a synced vault, a teammate's CSS) cannot build a full-window overlay.
+    // The other half of that defence is the `secure` list in mermaid/renderer.
+    expect(editorThemeSpec[".cm-md-mermaid"].contain).toBe("paint");
+    // Padding, never margin: CM6 measures a block widget with
+    // getBoundingClientRect, which does not see margins.
+    expect(editorThemeSpec[".cm-md-mermaid"].paddingBlock).toBe("var(--sp-3)");
+    expect(editorThemeSpec[".cm-md-mermaid"].margin).toBeUndefined();
+  });
+
   it("does NOT give an inline PDF embed the inset class — it sits inside a padded line", () => {
     const view = mount("Before.\n\n![spec](files/spec.pdf)\n");
     const pdf = view.contentDOM.querySelector(".cm-md-pdf")!;

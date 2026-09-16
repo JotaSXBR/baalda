@@ -42,6 +42,15 @@ describe("code fence flair", () => {
     view.destroy();
   });
 
+  it("skips a mermaid fence, which live preview draws instead", () => {
+    // Same rule as the html fence, through the same authority (fenceKind.ts):
+    // the fence line is replaced by the diagram, so a button pinned to it
+    // would hang over a line nobody can see.
+    const view = mount("```mermaid\nflowchart TD\n  A-->B\n```");
+    expect(view.contentDOM.querySelector(".cm-fence-copy")).toBeNull();
+    view.destroy();
+  });
+
   it("skips an empty fence", () => {
     const view = mount("```js\n```");
     expect(view.contentDOM.querySelector(".cm-fence-copy")).toBeNull();
