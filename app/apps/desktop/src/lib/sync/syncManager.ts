@@ -192,6 +192,14 @@ export class DocSync {
    * about it.
    */
   private unsyncedCount = 0;
+  /**
+   * Local document updates made while the provider was NOT yet synced — the
+   * only edits the handshake can hide. See `onSynced` for why the provider's
+   * count cannot answer this on its own.
+   */
+  private editsDuringHandshake = 0;
+  /** The Y.Doc this provider carries; kept so the update listener can be removed. */
+  private readonly doc: Y.Doc;
   /** Waiters parked in {@link whenFlushed}. */
   private flushWaiters: Array<(ok: boolean) => void> = [];
   /**
@@ -210,6 +218,7 @@ export class DocSync {
     this.onPending = opts.onPending;
     this.onFlushed = opts.onFlushed;
     this.settleDelayMs = opts.settleDelayMs ?? 700;
+    this.doc = opts.doc;
 
     const wsUrl = opts.wsUrl ?? deriveWsUrl(this.api.getBaseUrl());
     const name = `vault:${opts.vaultId}/note:${opts.docId}`;
@@ -323,9 +332,20 @@ export class DocSync {
         }
       },
       onSynced: () => {
-        // Anything still unsynced now is a real local edit (see
-        // `onUnsyncedChanges`): take over the indicator for it.
-        if (!this.destroyed && this.unsyncedCount > 0) this.setPending(true);
+        // Take over the indicator ONLY for an edit typed during the connect.
+        //
+        // The provider's count is no witness here. `startSync` resets it to 1
+        // for the sync-step it is about to send, and the server's own
+        // sync-step-2 flips `synced` while that unit is still outstanding (its
+        // `SyncStatus` ack answers OUR step 2, which goes out after). So on every
+        // clean note open this fires with count 1 and nothing to send — reading
+        // "count > 0" as pending painted "Syncing…" until the ack plus the
+        // settle delay, on every single click. Only a document update we saw
+        // ourselves during the handshake is an edit the server may not have.
+        if (!this.destroyed && this.editsDuringHandshake > 0 && this.unsyncedCount > 0) {
+          this.setPending(true);
+        }
+        this.editsDuringHandshake = 0;
         if (!this.destroyed && !isTerminalSyncStatus(this._status)) {
           this.noteAuthSuccess();
           this.setStatus(this._readOnly ? "read-only" : "synced");
@@ -372,7 +392,19 @@ export class DocSync {
     });
 
     this.awareness = this.provider.awareness as Awareness;
+    this.doc.on("update", this.trackHandshakeEdit);
   }
+
+  /**
+   * Count a local edit made before the initial sync. Updates the provider
+   * applied (remote ops) carry the provider itself as their origin and are not
+   * edits of ours; anything else — a keystroke, a disk ingest — is content the
+   * server may still be missing when `onSynced` fires.
+   */
+  private readonly trackHandshakeEdit = (_update: Uint8Array, origin: unknown): void => {
+    if (this.destroyed || origin === this.provider) return;
+    if (!this.provider.isSynced) this.editsDuringHandshake++;
+  };
 
   get status(): SyncStatus {
     return this._status;
@@ -601,6 +633,7 @@ export class DocSync {
       this.authRetryTimer = null;
     }
     this.refresher.cancel();
+    this.doc.off("update", this.trackHandshakeEdit);
     try {
       this.provider.destroy();
     } catch {

@@ -231,22 +231,78 @@ describe("DocSync — pending means an edit, not the handshake", () => {
     sync.destroy();
   });
 
-  it("does not lose an edit typed while the socket was still connecting", () => {
+  it("stays quiet on the real wire order: synced fires while the handshake unit is still unacked", () => {
+    // What the provider actually does on a clean open (@hocuspocus/provider
+    // 4.x): `startSync` resets the count to 1 for the sync-step it sends; the
+    // server's sync-step-2 flips `synced` while that unit is STILL outstanding,
+    // and only the ack of our own step 2 brings it to 0. Reading "count > 0" at
+    // `onSynced` therefore said "Syncing…" on every note open, with nothing to
+    // send — the third-cause fix moved the flash rather than removing it.
     const pending: boolean[] = [];
+    const flushed: number[] = [];
     const sync = new DocSync({
       api: api(200),
       doc: new Y.Doc(),
       docId: "d1",
       vaultId: "v1",
       onPending: (p) => pending.push(p),
+      onFlushed: () => flushed.push(1),
+      settleDelayMs: 0,
     });
-    captured.handlers!.onUnsyncedChanges?.({ number: 3 }); // handshake + a keystroke
+    captured.handlers!.onUnsyncedChanges?.({ number: 1 }); // startSync's reset
+    captured.instance!.isSynced = true;
+    captured.handlers!.onSynced?.(); // server's step 2, count still 1
+    expect(pending).toEqual([]);
+    expect(sync.pending).toBe(false);
+    captured.handlers!.onUnsyncedChanges?.({ number: 0 }); // SyncStatus ack
+    expect(pending).toEqual([]);
+    // No pending→settled edge happened, so "Synced · just now" is not re-stamped
+    // either: opening a note is not a sync event.
+    expect(flushed).toEqual([]);
+    sync.destroy();
+  });
+
+  it("does not lose an edit typed while the socket was still connecting", () => {
+    const pending: boolean[] = [];
+    const doc = new Y.Doc();
+    const sync = new DocSync({
+      api: api(200),
+      doc,
+      docId: "d1",
+      vaultId: "v1",
+      onPending: (p) => pending.push(p),
+    });
+    captured.handlers!.onUnsyncedChanges?.({ number: 1 }); // startSync's reset
+    // A keystroke lands before the server has answered: a LOCAL document update
+    // (origin: the editor), which the provider also counts.
+    doc.getText("content").insert(0, "x", "editor");
+    captured.handlers!.onUnsyncedChanges?.({ number: 2 });
     expect(pending).toEqual([]);
     captured.instance!.isSynced = true;
-    // The count is still above zero when the initial sync lands, so it is a
-    // real edit now and the indicator picks it up.
+    // The count is still above zero when the initial sync lands AND we saw a
+    // local edit during the handshake, so the indicator picks it up.
     captured.handlers!.onSynced?.();
     expect(pending).toEqual([true]);
+    sync.destroy();
+  });
+
+  it("does not count the updates the provider itself applies as handshake edits", () => {
+    const pending: boolean[] = [];
+    const doc = new Y.Doc();
+    const sync = new DocSync({
+      api: api(200),
+      doc,
+      docId: "d1",
+      vaultId: "v1",
+      onPending: (p) => pending.push(p),
+    });
+    captured.handlers!.onUnsyncedChanges?.({ number: 1 });
+    // The server's step 2 carries the doc's content; the provider applies it
+    // with itself as the transaction origin. That is a download, not an edit.
+    doc.transact(() => doc.getText("content").insert(0, "remote"), captured.instance);
+    captured.instance!.isSynced = true;
+    captured.handlers!.onSynced?.();
+    expect(pending).toEqual([]);
     sync.destroy();
   });
 });

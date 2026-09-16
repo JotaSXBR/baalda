@@ -57,9 +57,17 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   reports `onUnsyncedChanges` for the sync-step/awareness messages it queues
   while the socket comes up, and `DocSync` turned any count > 0 into
   `pending`, which the pill renders as "Syncing…" for the length of the
-  connect. `DocSync` now ignores the count until `provider.isSynced`, and
-  `onSynced` re-reads it so a keystroke typed during the connect still shows as
-  pending. Two tests in `docSyncAuth.test.ts`.
+  connect. `DocSync` now ignores the count until `provider.isSynced`. The first
+  cut then re-read the count in `onSynced`, which moved the flash rather than
+  removing it: `startSync` resets the count to 1 for the sync-step it sends,
+  and the server's sync-step-2 flips `synced` while that unit is still
+  outstanding (its `SyncStatus` ack answers our step 2, sent after), so every
+  clean open reached `onSynced` with count 1 and painted "Syncing…" until the
+  ack plus the 700 ms settle — and re-stamped "Synced · just now" on the way
+  out. `DocSync` now watches the Y.Doc for local updates made during the
+  handshake (anything whose origin is not the provider) and lets `onSynced`
+  take over the indicator only for those. Four tests in `docSyncAuth.test.ts`,
+  one of them the real wire order.
 - **"Syncing" on note open, second cause.** Opening a note connects its doc;
   the server's version capture stamps `last edited` on the first change of a
   session and broadcasts `registry-changed`; every client then re-pulls the
