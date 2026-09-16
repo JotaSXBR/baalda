@@ -32,11 +32,16 @@ function matches(issue: HealthIssue, f: Filter): boolean {
   return issue.kind === f.kind;
 }
 
+const NO_DISMISSED: ReadonlySet<string> = new Set();
+
 export function HealthIssues({
   issues,
   handlers,
   syncEnabled,
   focusKey,
+  dismissed = NO_DISMISSED,
+  onDismiss,
+  onRestore,
 }: {
   issues: HealthIssue[];
   handlers: HealthHandlers;
@@ -44,6 +49,11 @@ export function HealthIssues({
   syncEnabled: boolean;
   /** Set by the inspector's "See its entry above": expand and scroll to it. */
   focusKey?: string | null;
+  /** Rows the reader has hidden (per vault, this device). They leave the list
+   *  and the counts and wait in a "Dismissed" drawer at the bottom. */
+  dismissed?: ReadonlySet<string>;
+  onDismiss?: (key: string) => void;
+  onRestore?: (key: string) => void;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
@@ -57,23 +67,28 @@ export function HealthIssues({
   const [bulk, setBulk] = useState<{ verb: string; done: number; total: number } | null>(null);
   const rows = useRef(new Map<string, HTMLLIElement>());
 
-  const errors = issues.filter((i) => i.severity === "error").length;
+  // Everything below counts and lists `live`; a dismissed row is out of the
+  // page's arithmetic, not merely hidden at the end of it.
+  const live = useMemo(() => issues.filter((i) => !dismissed.has(i.key)), [issues, dismissed]);
+  const hidden = useMemo(() => issues.filter((i) => dismissed.has(i.key)), [issues, dismissed]);
+
+  const errors = live.filter((i) => i.severity === "error").length;
   const kinds = useMemo(() => {
     const counts = new Map<HealthIssueKind, number>();
-    for (const i of issues) counts.set(i.kind, (counts.get(i.kind) ?? 0) + 1);
+    for (const i of live) counts.set(i.kind, (counts.get(i.kind) ?? 0) + 1);
     return [...counts.entries()];
-  }, [issues]);
+  }, [live]);
 
   const shown = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return issues.filter((i) => {
+    return live.filter((i) => {
       if (!matches(i, filter)) return false;
       if (q === "") return true;
       return (
         (i.path ?? "").toLowerCase().includes(q) || i.title.toLowerCase().includes(q)
       );
     });
-  }, [issues, filter, query]);
+  }, [live, filter, query]);
 
   // A focus request from the inspector opens the row and brings it into view.
   // Deliberately keyed on the request rather than on the row: asking for the
@@ -95,21 +110,26 @@ export function HealthIssues({
   const retryable = picked.filter((i) => i.remedies.includes("retry") && i.docId);
   const deletable = picked.filter((i) => i.remedies.includes("delete") && i.path);
 
-  if (issues.length === 0) {
+  if (live.length === 0) {
     return (
-      <div className="health-allclear">
-        <span className="health-allclear-badge" aria-hidden="true">
-          <Glyph name="check" size={18} />
-        </span>
-        <div>
-          <strong>Nothing needs attention</strong>
-          <p className="muted">
-            {syncEnabled
-              ? "Every note the server knows about is confirmed."
-              : "Sync is off, so there is nothing to report here."}
-          </p>
+      <>
+        <div className="health-allclear">
+          <span className="health-allclear-badge" aria-hidden="true">
+            <Glyph name="check" size={18} />
+          </span>
+          <div>
+            <strong>Nothing needs attention</strong>
+            <p className="muted">
+              {hidden.length > 0
+                ? `${hidden.length} ${hidden.length === 1 ? "row is" : "rows are"} dismissed below.`
+                : syncEnabled
+                  ? "Every note the server knows about is confirmed."
+                  : "Sync is off, so there is nothing to report here."}
+            </p>
+          </div>
         </div>
-      </div>
+        {hidden.length > 0 && <DismissedIssues rows={hidden} onRestore={onRestore} />}
+      </>
     );
   }
 
@@ -150,7 +170,7 @@ export function HealthIssues({
     <>
       <div className="health-issue-toolbar">
         <div className="health-chips" role="group" aria-label="Filter issues">
-          <Chip active={filter === "all"} onClick={() => setFilter("all")} count={issues.length}>
+          <Chip active={filter === "all"} onClick={() => setFilter("all")} count={live.length}>
             All
           </Chip>
           {errors > 0 && (
@@ -158,11 +178,11 @@ export function HealthIssues({
               Errors
             </Chip>
           )}
-          {issues.length - errors > 0 && (
+          {live.length - errors > 0 && (
             <Chip
               active={filter === "warn"}
               onClick={() => setFilter("warn")}
-              count={issues.length - errors}
+              count={live.length - errors}
             >
               Warnings
             </Chip>
@@ -179,7 +199,7 @@ export function HealthIssues({
               </Chip>
             ))}
         </div>
-        {issues.length > SEARCH_AT && (
+        {live.length > SEARCH_AT && (
           <input
             type="search"
             className="health-search"
@@ -227,6 +247,18 @@ export function HealthIssues({
               Delete selected
             </button>
           )}
+          {!bulk && onDismiss && (
+            <button
+              type="button"
+              className="link-btn"
+              onClick={() => {
+                for (const i of picked) onDismiss(i.key);
+                setSelected(new Set());
+              }}
+            >
+              Ignore selected
+            </button>
+          )}
           {!bulk && (
             <button type="button" className="link-btn" onClick={() => setSelected(new Set())}>
               Clear
@@ -269,11 +301,55 @@ export function HealthIssues({
                 if (el) rows.current.set(issue.key, el);
                 else rows.current.delete(issue.key);
               }}
+              onDismiss={onDismiss ? () => onDismiss(issue.key) : undefined}
             />
           ))}
         </ul>
       )}
+      {hidden.length > 0 && <DismissedIssues rows={hidden} onRestore={onRestore} />}
     </>
+  );
+}
+
+/** Where dismissed rows wait. One quiet line until opened; each row has its
+ *  way back, because "I know" today is not "never tell me" forever. */
+function DismissedIssues({
+  rows,
+  onRestore,
+}: {
+  rows: HealthIssue[];
+  onRestore?: (key: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="health-ignored">
+      <button
+        type="button"
+        className="health-ignored-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="health-chevron" data-open={open ? "" : undefined} aria-hidden="true">
+          <Glyph name="chevron" />
+        </span>
+        Ignored · {rows.length}
+      </button>
+      {open && (
+        <ul className="health-ignored-list">
+          {rows.map((i) => (
+            <li key={i.key}>
+              <span className="health-ignored-label">{i.title}</span>
+              {i.path && <PathText path={i.path} />}
+              {onRestore && (
+                <button type="button" className="link-btn" onClick={() => onRestore(i.key)}>
+                  Show again
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -287,6 +363,7 @@ function IssueRow({
   selected,
   onSelect,
   register,
+  onDismiss,
 }: {
   issue: HealthIssue;
   handlers: HealthHandlers;
@@ -295,6 +372,8 @@ function IssueRow({
   selected: boolean;
   onSelect: () => void;
   register: (el: HTMLLIElement | null) => void;
+  /** Hide this row (per vault, this device). Absent ⇒ no button. */
+  onDismiss?: () => void;
 }) {
   const panelId = `health-panel-${encodeURIComponent(issue.key)}`;
   const primary = issue.remedies.find((r) => hasData(issue, r)) ?? null;
@@ -343,6 +422,16 @@ function IssueRow({
           <div className="health-issue-primary">
             <Remedy remedy={primary} issue={issue} handlers={handlers} emphasis />
           </div>
+        )}
+        {onDismiss && (
+          <button
+            type="button"
+            className="link-btn health-issue-dismiss"
+            title="Hide this row for this vault on this device — it waits in the Ignored list"
+            onClick={onDismiss}
+          >
+            Ignore
+          </button>
         )}
       </div>
 

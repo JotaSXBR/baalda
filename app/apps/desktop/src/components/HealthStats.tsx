@@ -4,7 +4,7 @@
    `VaultStats`; nothing is derived from the sync layer, so this whole block is
    just as true for a vault that has never had a server. */
 import { useState } from "react";
-import type { HistoryFootprint, SizedFile, VaultStats } from "../lib/health/types";
+import type { HistoryFootprint, SizedFile, VaultCheckId, VaultStats } from "../lib/health/types";
 import { activityLevel, formatBytes, relativeTime } from "../lib/health/format";
 import { MAX_NOTE_BYTES } from "../lib/sync/contentUpload";
 import { AsyncButton } from "./AsyncButton";
@@ -24,6 +24,8 @@ interface Metric {
   sub?: string;
   /** Short inline note when something is off ("1 broken"), amber. */
   flag?: string;
+  /** The check that lists the affected files; the flag becomes a link to it. */
+  check?: VaultCheckId;
   action?: "reclaim";
 }
 
@@ -38,11 +40,15 @@ export function HealthStats({
   loading,
   statsError,
   handlers,
+  onFlag,
 }: {
   stats: VaultStats | null;
   loading: boolean;
   statsError: string | null;
   handlers: HealthHandlers;
+  /** A flag like "1 broken" is a dead end unless it leads somewhere: this opens
+   *  the check that lists the files. */
+  onFlag?: (check: VaultCheckId) => void;
 }) {
   if (!stats) {
     return (
@@ -87,12 +93,14 @@ export function HealthStats({
       label: "Links",
       value: stats.links.toLocaleString(),
       flag: stats.brokenLinks > 0 ? `${stats.brokenLinks.toLocaleString()} broken` : undefined,
+      check: "broken-links",
     },
     {
       icon: "empty",
       label: "Empty notes",
       value: stats.notes.empty.toLocaleString(),
       flag: stats.notes.empty > 0 ? "0 bytes" : undefined,
+      check: "empty-notes",
     },
     {
       icon: "disk",
@@ -115,6 +123,7 @@ export function HealthStats({
         orphans > 0
           ? `${formatBytes(stats.history.orphanBytes)} reclaimable`
           : undefined,
+      check: "orphan-history",
       action: orphans > 0 ? "reclaim" : undefined,
     },
   ];
@@ -135,7 +144,19 @@ export function HealthStats({
               <Glyph name={m.icon} size={12} />
               {m.label}
             </span>
-            {m.flag && <span className="health-metric-flag">{m.flag}</span>}
+            {m.flag &&
+              (m.check && onFlag ? (
+                <button
+                  type="button"
+                  className="health-metric-flag"
+                  title="Show the affected files"
+                  onClick={() => onFlag(m.check as VaultCheckId)}
+                >
+                  {m.flag}
+                </button>
+              ) : (
+                <span className="health-metric-flag">{m.flag}</span>
+              ))}
             {m.action === "reclaim" && (
               <AsyncButton className="link-btn health-metric-action" onClick={handlers.reclaim}>
                 Reclaim

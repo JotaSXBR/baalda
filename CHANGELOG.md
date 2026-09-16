@@ -471,6 +471,15 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   now one mechanism for both.
 
 ### Added
+- **Health page: ignore, skip, take action.** `lib/health/ignore.ts` +
+  `useHealthIgnores` keep a per-vault, per-device list (`localStorage`
+  `context.healthIgnored:<vaultPath>`) of ignored check ids and dismissed issue
+  keys. `HealthChecks` drops an ignored failing check from its groups and
+  headline into an "Ignored · N" drawer with Show again; `HealthIssues` does the
+  same for rows (plus "Ignore selected" in the bulk bar) and counts only live
+  rows in its chips. Metric flags in the strip ("1 broken", "0 bytes",
+  "reclaimable") are buttons that restore-if-ignored, open and scroll to the
+  matching check (`CheckFocus`, nonce-keyed so a repeat click scrolls again).
 - **Vault Settings → Health.** One page for "what is synced, what is not, why, and
   what is in this vault". A verdict card (`local` / `signed-out` / `no-access` /
   `offline` / `connecting` / `syncing` / `attention` / `healthy`, most urgent

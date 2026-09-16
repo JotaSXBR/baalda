@@ -29,7 +29,8 @@ import { AsyncButton } from "./AsyncButton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { UpgradeDialog } from "./UpgradeDialog";
 import { HealthIssues } from "./HealthIssues";
-import { HealthChecks } from "./HealthChecks";
+import { HealthChecks, type CheckFocus } from "./HealthChecks";
+import { useHealthIgnores } from "../lib/health/useHealthIgnores";
 import { HealthInspector } from "./HealthInspector";
 import { HealthTimeline } from "./HealthTimeline";
 import { HealthActivity, HealthLargest, HealthStats } from "./HealthStats";
@@ -65,12 +66,14 @@ export function HealthTab({
   // `HealthView` keeps rendering from nothing but its props — a fixture, in the
   // tests.
   const notes = useStore((s) => s.titles);
+  const vaultPath = useStore((s) => s.vault?.path ?? null);
 
   return (
     <>
       <HealthView
         snapshot={snapshot}
         notes={notes}
+        vaultPath={vaultPath}
         onGoToGeneral={onGoToGeneral}
         onClose={onClose}
       />
@@ -84,11 +87,14 @@ export function HealthTab({
 export function HealthView({
   snapshot,
   notes = [],
+  vaultPath = null,
   onGoToGeneral,
   onClose,
 }: {
   snapshot: VaultHealthSnapshot;
   notes?: NoteTitle[];
+  /** Keys the per-vault ignore list; null ⇒ nothing is remembered. */
+  vaultPath?: string | null;
   onGoToGeneral?: () => void;
   onClose?: () => void;
 }) {
@@ -103,6 +109,8 @@ export function HealthView({
 
   const [confirming, setConfirming] = useState<ConfirmState | null>(null);
   const [focusIssue, setFocusIssue] = useState<string | null>(null);
+  const [focusCheck, setFocusCheck] = useState<CheckFocus | null>(null);
+  const ignores = useHealthIgnores(vaultPath);
   const [inspectRequest, setInspectRequest] = useState<{ path: string; n: number } | null>(
     null,
   );
@@ -135,7 +143,17 @@ export function HealthView({
       {/* The vault's numbers sit right under the verdict as one quiet strip:
           they frame everything below ("15 notes, 259 KB") without competing
           with it. */}
-      <HealthStats stats={stats} loading={loading} statsError={statsError} handlers={handlers} />
+      <HealthStats
+        stats={stats}
+        loading={loading}
+        statsError={statsError}
+        handlers={handlers}
+        onFlag={(id) => {
+          // A flag the reader clicks is one they want to see, ignored or not.
+          ignores.restoreCheck(id);
+          setFocusCheck((f) => ({ id, n: (f?.n ?? 0) + 1 }));
+        }}
+      />
 
       <Pipeline stages={report.stages} />
 
@@ -163,6 +181,9 @@ export function HealthView({
           handlers={handlers}
           syncEnabled={report.counts != null}
           focusKey={focusIssue}
+          dismissed={ignores.issues}
+          onDismiss={ignores.dismissIssue}
+          onRestore={ignores.restoreIssue}
         />
       </Section>
 
@@ -184,6 +205,10 @@ export function HealthView({
           loading={loading}
           handlers={handlers}
           onRefresh={refresh}
+          ignored={ignores.checks}
+          onIgnore={ignores.ignoreCheck}
+          onRestore={ignores.restoreCheck}
+          focus={focusCheck}
         />
       </Section>
 

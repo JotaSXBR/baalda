@@ -1514,3 +1514,92 @@
     transition: none;
   }
 }
+
+/* ── Ignore / dismiss ─────────────────────────────────────────────────────── */
+button.health-metric-flag {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-size: var(--fs-xs);
+  color: var(--warning);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  text-align: left;
+}
+button.health-metric-flag:hover {
+  text-decoration-style: solid;
+}
+.health-check-ignore,
+.health-issue-dismiss {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.health-check:hover .health-check-ignore,
+.health-check:focus-within .health-check-ignore,
+.health-issue:hover .health-issue-dismiss,
+.health-issue:focus-within .health-issue-dismiss {
+  opacity: 1;
+}
+.health-ignored {
+  margin-top: var(--sp-4);
+}
+.health-ignored-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.health-ignored-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+.health-ignored-list {
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.health-ignored-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+.health-ignored-list .health-path {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.health-ignored-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.health-ignored-count {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+@media (prefers-reduced-motion: reduce) {
+  .health-check-ignore,
+  .health-issue-dismiss {
+    opacity: 1;
+    transition: none;
+  }
+}

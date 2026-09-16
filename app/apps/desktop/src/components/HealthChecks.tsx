@@ -13,7 +13,7 @@
    A passing row still exists, though, and that is the point of listing all
    fifteen: "no case collisions" is information, and a page that hides its
    passes cannot be trusted to have run them. */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   CHECK_GROUP_LABELS,
   checkRows,
@@ -21,7 +21,7 @@ import {
   type CheckAction,
   type CheckRow,
 } from "../lib/health/checks";
-import type { VaultCheckItem, VaultChecks } from "../lib/health/types";
+import type { VaultCheckId, VaultCheckItem, VaultChecks } from "../lib/health/types";
 import { formatBytes } from "../lib/health/format";
 import { AsyncButton } from "./AsyncButton";
 import { Eyebrow, Glyph, PathText, type HealthHandlers } from "./HealthShared";
@@ -37,16 +37,36 @@ export function firstSentence(text: string): string {
   return m ? m[1] : t;
 }
 
+/** A request to open one check and scroll to it. `n` changes per request, so
+ *  asking for the same check twice scrolls twice. */
+export interface CheckFocus {
+  id: VaultCheckId;
+  n: number;
+}
+
+const NO_IGNORES: ReadonlySet<VaultCheckId> = new Set();
+
 export function HealthChecks({
   checks,
   loading,
   handlers,
   onRefresh,
+  ignored = NO_IGNORES,
+  onIgnore,
+  onRestore,
+  focus = null,
 }: {
   checks: VaultChecks | null;
   loading: boolean;
   handlers: HealthHandlers;
   onRefresh: () => void;
+  /** Checks the reader has chosen to live with (per vault, this device). They
+   *  leave the groups and the headline and wait in an "Ignored" drawer. */
+  ignored?: ReadonlySet<VaultCheckId>;
+  onIgnore?: (id: VaultCheckId) => void;
+  onRestore?: (id: VaultCheckId) => void;
+  /** From a metric flag ("1 broken"): open that check and bring it into view. */
+  focus?: CheckFocus | null;
 }) {
   if (checks == null) {
     if (loading) {
@@ -64,7 +84,12 @@ export function HealthChecks({
     return <p className="muted">Checks are not available for this vault.</p>;
   }
 
-  const rows = checkRows(checks);
+  const allRows = checkRows(checks);
+  // An ignored check that currently FAILS steps out of the groups and out of the
+  // headline — that is what ignoring means. One that passes is shown normally;
+  // there is nothing to ignore, and its tick is still information.
+  const ignoredRows = allRows.filter((r) => !r.passed && ignored.has(r.def.id));
+  const rows = allRows.filter((r) => r.passed || !ignored.has(r.def.id));
   const summary = summarizeChecks(rows);
   // Rust sends all fifteen ids in union order, count 0 when a check passes, so
   // this set is normally complete. It is tracked anyway: an OLDER core sends
@@ -103,13 +128,59 @@ export function HealthChecks({
                     !reported.has(row.def.id) ? "unknown" : row.passed ? "passed" : "failed"
                   }
                   handlers={handlers}
+                  onIgnore={onIgnore}
+                  focus={focus?.id === row.def.id ? focus : null}
                 />
               ))}
             </ul>
           </div>
         ),
       )}
+      {ignoredRows.length > 0 && <IgnoredChecks rows={ignoredRows} onRestore={onRestore} />}
     </>
+  );
+}
+
+/** The drawer an ignored check waits in. Collapsed to one line by default —
+ *  the reader asked not to see these — but never gone: "Ignored · 2" is the
+ *  honest summary, and each row has its way back. */
+function IgnoredChecks({
+  rows,
+  onRestore,
+}: {
+  rows: CheckRow[];
+  onRestore?: (id: VaultCheckId) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="health-ignored">
+      <button
+        type="button"
+        className="health-ignored-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="health-chevron" data-open={open ? "" : undefined} aria-hidden="true">
+          <Glyph name="chevron" />
+        </span>
+        Ignored · {rows.length}
+      </button>
+      {open && (
+        <ul className="health-ignored-list">
+          {rows.map((r) => (
+            <li key={r.def.id}>
+              <span className="health-ignored-label">{r.def.label}</span>
+              <span className="health-ignored-count">{r.result.count.toLocaleString()}</span>
+              {onRestore && (
+                <button type="button" className="link-btn" onClick={() => onRestore(r.def.id)}>
+                  Show again
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -138,12 +209,24 @@ function CheckItem({
   row,
   state,
   handlers,
+  onIgnore,
+  focus,
 }: {
   row: CheckRow;
   state: CheckState;
   handlers: HealthHandlers;
+  onIgnore?: (id: VaultCheckId) => void;
+  focus: CheckFocus | null;
 }) {
-  const [open, setOpen] = useState(false);
+  // Seeded from `focus` so a row asked for at mount is open in the first
+  // render (the page is tested with static markup, where effects never run).
+  const [open, setOpen] = useState(focus != null);
+  const li = useRef<HTMLLIElement | null>(null);
+  useEffect(() => {
+    if (!focus) return;
+    setOpen(true);
+    li.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [focus?.n]);
   const { def, result } = row;
   const panelId = `health-check-${def.id}`;
   const failed = state === "failed";
@@ -155,6 +238,7 @@ function CheckItem({
 
   return (
     <li
+      ref={li}
       className="health-check"
       data-tone={tone(def, state)}
       data-state={state}
@@ -199,6 +283,16 @@ function CheckItem({
           {state === "unknown" && <span className="health-check-note">Not run</span>}
         </button>
         {failed && def.bulkAction && <BulkAction action={def.bulkAction} handlers={handlers} />}
+        {failed && onIgnore && (
+          <button
+            type="button"
+            className="link-btn health-check-ignore"
+            title="Stop showing this check for this vault on this device — it waits in the Ignored list"
+            onClick={() => onIgnore(def.id)}
+          >
+            Ignore
+          </button>
+        )}
       </div>
 
       {failed && open && (
