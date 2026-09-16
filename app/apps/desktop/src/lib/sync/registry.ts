@@ -690,6 +690,29 @@ export class VaultRegistry {
     return this.byPath.get(relPath) ?? null;
   }
 
+  /**
+   * {@link getMapping}, but tolerant of a case-different spelling.
+   *
+   * `byPath` is keyed by the path the SERVER says a doc lives at (see
+   * `registerNote`), while the sidebar and the editor know a note by its DISK
+   * spelling. On macOS/Windows those are the same file even when they disagree
+   * about case, so an exact `Map.get` can miss a note that is perfectly well
+   * mapped — which used to leave a teammate's presence dot homeless on the
+   * receiving side and made the sender announce nothing on the sending side
+   * (#125).
+   *
+   * Hot path (`peersForNode` runs per sidebar row, per render): an exact hit
+   * costs one `Map.get` and never touches the folded index; the O(n) build
+   * behind `canonicalNotePath` happens only on a genuine miss, is cached, and
+   * is invalidated once per mutation batch by `notifyMapChanged`.
+   */
+  getMappingCi(relPath: string): DocMapping | null {
+    const exact = this.byPath.get(relPath);
+    if (exact) return exact;
+    const canonical = this.canonicalNotePath(relPath);
+    return canonical ? (this.byPath.get(canonical) ?? null) : null;
+  }
+
   /** Vault-relative path for a docId, if mapped (reverse of getMapping). */
   pathForDocId(docId: string): string | null {
     return this.byDocId.get(docId) ?? null;

@@ -82,6 +82,32 @@ describe("VaultRegistry.reconcile — vault adoption (joining member)", () => {
     expect(reg.getMapping("Team/hello.md")).toEqual({ vaultId: "v-owner", docId: "n1" });
   });
 
+  it("resolves a mapped note through a case-different disk spelling", async () => {
+    // `byPath` is keyed by the path the SERVER says the doc lives at, but the
+    // sidebar and the presence announce both work from the DISK spelling — and
+    // on macOS/Windows `Projects/Community/x.md` and `Projects/community/x.md`
+    // are one file. An exact-only lookup therefore reported "not mapped" for a
+    // perfectly well mapped note, which is one of the ways a joiner's presence
+    // dot went missing (#125).
+    const { api } = fakeApi({
+      vaults: [{ id: "v-owner", name: "MyNotes", organization_id: ORG }],
+      notes: [{ id: "n1", rel_path: "Projects/Community/plan.md" }],
+    });
+    const reg = new VaultRegistry(api);
+    await reconcileWithTree(reg, { organizationId: ORG, vaultName: "acme" }, emptyTree());
+
+    const mapping = { vaultId: "v-owner", docId: "n1" };
+    // Exact spelling: unchanged on both accessors, and the cheap path.
+    expect(reg.getMapping("Projects/Community/plan.md")).toEqual(mapping);
+    expect(reg.getMappingCi("Projects/Community/plan.md")).toEqual(mapping);
+    // Disk spelling differs only in case — same file, so the same doc.
+    expect(reg.getMapping("Projects/community/plan.md")).toBeNull();
+    expect(reg.getMappingCi("Projects/community/plan.md")).toEqual(mapping);
+    expect(reg.getMappingCi("projects/COMMUNITY/PLAN.md")).toEqual(mapping);
+    // A path that genuinely isn't mapped still answers null, both ways.
+    expect(reg.getMappingCi("Projects/Community/other.md")).toBeNull();
+  });
+
   it("adopts by id (oldest in org) — a name-matching vault never wins over it", async () => {
     // Names collide and differ per device; every device must deterministically
     // land on the SAME server vault. The org's oldest vault is the canonical one,

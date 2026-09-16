@@ -2130,7 +2130,10 @@ function descendantDocIds(node: TreeNode, out: string[]): void {
     if (child.isDir) {
       descendantDocIds(child, out);
     } else {
-      const mapping = syncManager.registry.getMapping(child.path);
+      // Case-insensitive: the registry keys a note by the SERVER's spelling of
+      // its path, which on macOS/Windows can differ from the disk spelling this
+      // tree carries (#125). Exact hits still cost one Map.get.
+      const mapping = syncManager.registry.getMappingCi(child.path);
       if (mapping) out.push(mapping.docId);
     }
   }
@@ -2159,7 +2162,9 @@ function peersForNode(
     }
     return rolled;
   }
-  const mapping = syncManager.registry.getMapping(node.data.path);
+  // Same case-insensitive reason as `descendantDocIds`: an exact-only lookup
+  // left a teammate's dot homeless whenever the two spellings disagreed.
+  const mapping = syncManager.registry.getMappingCi(node.data.path);
   return mapping ? (presenceByDoc.get(mapping.docId) ?? []) : [];
 }
 

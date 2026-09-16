@@ -68,7 +68,6 @@ import { planTurnOnSync } from "./lib/vault/turnOnSync";
 import { planOpen } from "./lib/sync/openGate";
 import { rediscoverVaultFolder } from "./lib/vault/rediscover";
 import { playJoinChime } from "./lib/celebrate/celebrate";
-import { viewingDocId } from "./lib/presence/viewingDocId";
 import { dismissToast, toast } from "./lib/toast";
 import { parseNoteLink } from "./lib/shareLink";
 import { parseInviteDeepLink } from "./lib/inviteLink";
@@ -1771,11 +1770,12 @@ export const useStore = create<AppStore>((set, get) => ({
       // alternative is threading a flag through all of this action's callers.
       get().requestReveal(path);
       // Tell teammates which note we're now viewing (drives their sidebar dots).
-      // The announced id must be the SERVER doc_id — see `viewingDocId`, which
-      // exists to hold that reasoning and a regression test for it.
-      syncManager.setViewing(
-        viewingDocId(meta?.id, syncManager.registry.getMapping(path)?.docId),
-      );
+      // The announced id must be the SERVER doc_id — see `viewingDocId`. We hand
+      // over the PATH rather than a resolved id: opening a note while the
+      // post-join reconcile is still running finds no mapping yet, and a value
+      // resolved here would be replayed, unchanged, for the whole session (#125).
+      // The sync layer re-resolves on every announce and again when the map moves.
+      syncManager.setViewing(path, meta?.id ?? null);
       await get().refreshBacklinks();
     } finally {
       // Only the newest open clears it: two quick clicks would otherwise have the

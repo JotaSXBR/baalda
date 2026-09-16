@@ -18,6 +18,7 @@ import * as ipc from "../ipc";
 import { markOnce } from "../perf";
 import { api } from "../auth/authManager";
 import { colorForUser, presenceUser } from "../presence/color";
+import { viewingDocId } from "../presence/viewingDocId";
 import type { ActivityStatus } from "../prefs";
 import { toast } from "../toast";
 import { AttachmentSync } from "./attachments";
@@ -67,6 +68,17 @@ function reasonOf(err: unknown): string {
  * writes/second) for the same reason.
  */
 const REGISTRY_MAP_PUBLISH_MS = 100;
+
+/**
+ * Coalescing window for the presence re-announce a registry map change earns.
+ *
+ * The map listener fires once per adopted/created note, and resolving the open
+ * note's id can rebuild the registry's case-folded index on a miss — doing that
+ * per note would be quadratic over a big reconcile. One timer per burst keeps it
+ * to a handful of lookups, and the re-announce itself only goes on the wire when
+ * the RESOLVED id actually changed.
+ */
+const PRESENCE_REPUSH_MS = 150;
 
 /**
  * Quiet window before pushing locally-changed (externally-written) notes. Long
@@ -249,7 +261,13 @@ export class SyncManager implements InboundHost {
     // needs it to badge a row (every sync fact is keyed by docId). Mirror it out
     // reactively — coalesced — instead of letting the UI read it imperatively
     // during render, which never re-rendered when the mapping changed.
-    this.registry.setMapListener(() => this.scheduleRegistryMapPublish());
+    this.registry.setMapListener(() => {
+      this.scheduleRegistryMapPublish();
+      // The open note's server doc_id may only now exist. Presence is announced
+      // by PATH-resolution at send time, so this is the edge that gets a frame
+      // out without the user having to switch notes (#125).
+      this.schedulePresenceRepush();
+    });
     // Who last edited each note, refreshed by the same registry pull. Not
     // coalesced like the map above: it fires once per pull, not once per note.
     this.registry.setNoteMetaListener((meta) => this.publishNoteMeta(meta));
@@ -511,7 +529,23 @@ export class SyncManager implements InboundHost {
   // (last-write-wins across a user's devices), fed by the engine's presence
   // frames, surfaced to the sidebar. `viewingDocId` is our own current note.
   private vaultPresence = new Map<string, VaultPeer>();
-  private viewingDocId: string | null = null;
+  /**
+   * The note THIS client is looking at, held as a PATH (plus the local index id
+   * that proves a note is open) rather than as a resolved doc id.
+   *
+   * The id used to be resolved once, in `store.openNoteByPath`, and replayed
+   * from then on — so a note opened while the post-join reconcile was still
+   * running announced whatever was true in that instant (nothing, or a local
+   * id) for the rest of the session, and the owner never saw the joiner
+   * (#125). Resolution now happens at SEND time, in `pushLocalPresence`.
+   */
+  private viewing: { path: string; localId: string | null } | null = null;
+  /** The docId the last presence frame carried, so a registry map change only
+   *  re-announces when the RESOLVED id actually moved. */
+  private announcedDocId: string | null = null;
+  /** Paths already complained about (see `warnUnmapped`) — once each, per vault. */
+  private warnedUnmapped = new Set<string>();
+  private presenceRepushTimer: ReturnType<typeof setTimeout> | null = null;
   private onVaultPresence?: (peers: VaultPeer[]) => void;
 
   /** UI subscribes here to render the connection indicator. */
@@ -2446,7 +2480,13 @@ export class SyncManager implements InboundHost {
     this.clearStatusHold();
     this.emittedStatus = null;
     this.presence = null;
-    this.viewingDocId = null;
+    this.viewing = null;
+    this.announcedDocId = null;
+    this.warnedUnmapped.clear();
+    if (this.presenceRepushTimer) {
+      clearTimeout(this.presenceRepushTimer);
+      this.presenceRepushTimer = null;
+    }
     this.vaultStatus = "idle";
     // Timers first: a timer that fires after we've cleared the state below would
     // still see a live `registry`/`attachments` and act on the wrong vault.
@@ -2605,9 +2645,16 @@ export class SyncManager implements InboundHost {
     this.onVoiceSpeakers?.(this.voiceRoster.list());
   }
 
-  /** Record which note this client is now viewing (null = none) and broadcast it. */
-  setViewing(docId: string | null): void {
-    this.viewingDocId = docId;
+  /**
+   * Record which note this client is now viewing (null = none) and broadcast it.
+   *
+   * Takes the note's PATH, not a doc id: the server id is resolved through the
+   * registry on every send, so a mapping that lands later still reaches
+   * teammates (see {@link viewing}). `localId` is the local index id — it only
+   * has to prove a note is open; it is never announced.
+   */
+  setViewing(relPath: string | null, localId?: string | null): void {
+    this.viewing = relPath ? { path: relPath, localId: localId ?? null } : null;
     this.pushLocalPresence();
   }
 
@@ -2625,17 +2672,76 @@ export class SyncManager implements InboundHost {
     this.pushLocalPresence();
   }
 
+  /**
+   * The server doc_id to announce for the note we have open, resolved NOW.
+   *
+   * Case-insensitive on purpose: `byPath` is keyed by the server's spelling of
+   * a path and the store opens notes by their disk spelling, which on
+   * macOS/Windows can differ only in case for one and the same file.
+   */
+  private resolveViewingDocId(): string | null {
+    if (!this.viewing) return null;
+    const mapped = this.registry.getMappingCi(this.viewing.path)?.docId;
+    const docId = viewingDocId(this.viewing.localId, mapped);
+    if (!docId) this.warnUnmapped(this.viewing.path);
+    return docId;
+  }
+
+  /** What the next presence frame would carry (see {@link pushLocalPresence}). */
+  private effectiveViewingDocId(): string | null {
+    return this.status === "invisible" ? null : this.resolveViewingDocId();
+  }
+
+  /**
+   * Say out loud that we are about to announce "nothing" for an open note.
+   *
+   * Both ends of this used to fail in silence — the sender shrugged because a
+   * missing mapping is normal for a local vault, and the server dropped the
+   * unreadable id without a word — which is why #125 took a repro to find.
+   * Once per path per vault: a registry pull re-resolves thousands of times.
+   */
+  private warnUnmapped(relPath: string): void {
+    if (!this.vaultEngine || this.warnedUnmapped.has(relPath)) return;
+    this.warnedUnmapped.add(relPath);
+    console.warn(
+      `[presence] no server doc_id for "${relPath}" — announcing nothing. ` +
+        "Teammates won't see this note on their sidebar until the registry maps it.",
+    );
+  }
+
   /** Send our current viewing state over the vault channel. Invisible users
    *  broadcast a null doc so they don't appear on teammates' sidebars. */
   private pushLocalPresence(): void {
     if (!this.vaultEngine || !this.presence) return;
-    const docId = this.status === "invisible" ? null : this.viewingDocId;
+    const docId = this.effectiveViewingDocId();
+    this.announcedDocId = docId;
     this.vaultEngine.setPresence({
       docId,
       name: this.presence.name,
       color: colorForUser(this.presence.id),
       status: this.status,
     });
+  }
+
+  /** Coalesce a burst of registry map changes into at most one re-resolve. */
+  private schedulePresenceRepush(): void {
+    if (this.presenceRepushTimer) return;
+    this.presenceRepushTimer = setTimeout(() => {
+      this.presenceRepushTimer = null;
+      this.repushPresenceForMapping();
+    }, PRESENCE_REPUSH_MS);
+  }
+
+  /**
+   * The registry map moved; re-announce only if that changed the id we would
+   * send. Silent when nothing is open, when the mapping is still missing, and
+   * when the reconcile merely re-affirmed what we already announced — so a pull
+   * over thousands of notes costs one lookup, not thousands of frames.
+   */
+  private repushPresenceForMapping(): void {
+    if (!this.viewing || !this.vaultEngine || !this.presence) return;
+    if (this.effectiveViewingDocId() === this.announcedDocId) return;
+    this.pushLocalPresence();
   }
 
   /** Fold an incoming teammate presence update into the roster and notify the UI. */
