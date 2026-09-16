@@ -53,6 +53,13 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **"Syncing" on note open, third cause — the provider handshake.** Hocuspocus
+  reports `onUnsyncedChanges` for the sync-step/awareness messages it queues
+  while the socket comes up, and `DocSync` turned any count > 0 into
+  `pending`, which the pill renders as "Syncing…" for the length of the
+  connect. `DocSync` now ignores the count until `provider.isSynced`, and
+  `onSynced` re-reads it so a keystroke typed during the connect still shows as
+  pending. Two tests in `docSyncAuth.test.ts`.
 - **"Syncing" on note open, second cause.** Opening a note connects its doc;
   the server's version capture stamps `last edited` on the first change of a
   session and broadcasts `registry-changed`; every client then re-pulls the

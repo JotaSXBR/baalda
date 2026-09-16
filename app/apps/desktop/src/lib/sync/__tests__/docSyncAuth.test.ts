@@ -25,6 +25,8 @@ type Handlers = {
 
 const captured = vi.hoisted(() => ({
   handlers: null as Handlers | null,
+  /** The fake provider itself, so a test can flip `isSynced`. */
+  instance: null as { isSynced: boolean } | null,
   /** `websocketProvider.connect()` calls — one per reconnect attempt. */
   connects: 0,
   /** `websocketProvider.disconnect()` calls — how a terminal state stops the
@@ -39,6 +41,7 @@ vi.mock("@hocuspocus/provider", () => {
     readonly configuration: { websocketProvider: unknown };
     constructor(config: Handlers) {
       captured.handlers = config;
+      captured.instance = this;
       this.configuration = {
         websocketProvider: {
           status: "disconnected",
@@ -85,6 +88,7 @@ function docSync(client: ApiClient): DocSync {
 
 beforeEach(() => {
   captured.handlers = null;
+  captured.instance = null;
   captured.connects = 0;
   captured.disconnects = 0;
 });
@@ -194,6 +198,55 @@ describe("DocSync — an open socket is not an authenticated one", () => {
 
     random.mockRestore();
     vi.useRealTimers();
+    sync.destroy();
+  });
+});
+
+describe("DocSync — pending means an edit, not the handshake", () => {
+  it("ignores unsynced counts before the initial sync, then takes over real edits", () => {
+    const pending: boolean[] = [];
+    const sync = new DocSync({
+      api: api(200),
+      doc: new Y.Doc(),
+      docId: "d1",
+      vaultId: "v1",
+      onPending: (p) => pending.push(p),
+    });
+    // Opening a note: the provider queues its sync-step and awareness messages
+    // and reports them as "unsynced changes" before the socket has answered.
+    // That used to paint "Syncing…" on every note open.
+    captured.handlers!.onUnsyncedChanges?.({ number: 2 });
+    expect(pending).toEqual([]);
+    expect(sync.pending).toBe(false);
+
+    // Handshake done, nothing outstanding: still quiet.
+    captured.instance!.isSynced = true;
+    captured.handlers!.onUnsyncedChanges?.({ number: 0 });
+    captured.handlers!.onSynced?.();
+    expect(pending).toEqual([]);
+
+    // A real edit after the initial sync is pending until acked.
+    captured.handlers!.onUnsyncedChanges?.({ number: 1 });
+    expect(pending).toEqual([true]);
+    sync.destroy();
+  });
+
+  it("does not lose an edit typed while the socket was still connecting", () => {
+    const pending: boolean[] = [];
+    const sync = new DocSync({
+      api: api(200),
+      doc: new Y.Doc(),
+      docId: "d1",
+      vaultId: "v1",
+      onPending: (p) => pending.push(p),
+    });
+    captured.handlers!.onUnsyncedChanges?.({ number: 3 }); // handshake + a keystroke
+    expect(pending).toEqual([]);
+    captured.instance!.isSynced = true;
+    // The count is still above zero when the initial sync lands, so it is a
+    // real edit now and the indicator picks it up.
+    captured.handlers!.onSynced?.();
+    expect(pending).toEqual([true]);
     sync.destroy();
   });
 });

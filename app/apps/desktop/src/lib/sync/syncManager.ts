@@ -323,6 +323,9 @@ export class DocSync {
         }
       },
       onSynced: () => {
+        // Anything still unsynced now is a real local edit (see
+        // `onUnsyncedChanges`): take over the indicator for it.
+        if (!this.destroyed && this.unsyncedCount > 0) this.setPending(true);
         if (!this.destroyed && !isTerminalSyncStatus(this._status)) {
           this.noteAuthSuccess();
           this.setStatus(this._readOnly ? "read-only" : "synced");
@@ -344,6 +347,13 @@ export class DocSync {
             clearTimeout(this.settleTimer);
             this.settleTimer = null;
           }
+          // Before the initial sync the count is the HANDSHAKE — the sync-step
+          // and awareness messages the provider queues while the socket comes
+          // up — not an edit anyone made. Reporting it as pending turned every
+          // note open into "Syncing…" for the length of the connect. Edits made
+          // during that window are not lost to the indicator: `onSynced`
+          // re-reads the count once the handshake is out of the way.
+          if (!this.provider.isSynced) return;
           this.setPending(true);
           return;
         }
