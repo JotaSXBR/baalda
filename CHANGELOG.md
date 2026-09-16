@@ -53,6 +53,14 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **Sidebar sync marks hidden until the server answers** (`sidebarMarksVisible`
+  in `syncRollup.ts`, consulted by `FileTree`'s index memo). An offline launch
+  drew a hollow dot on every note and a "0/N" wave on every folder: the registry
+  stamps notes `queued` as it tries to register them and, offline, nothing ever
+  resolves the stamp. With `syncStatus` in `offline` / `connecting` / `error` /
+  `no-access` the tree draws no marks; `read-only` and the per-doc terminal
+  states count as answers. The wave tracker is not reset, so counters resume
+  rather than restart when the channel returns.
 - **Run stuck at "Syncing" when the vault channel settled before the reconcile
   returned.** Since the prime-window change (v0.1.60) the channel starts before
   `registry.reconcile()`, so on a small vault its `ready` and the backfill's

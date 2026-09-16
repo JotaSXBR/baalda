@@ -42,6 +42,7 @@ import {
   buildTreeSyncIndex,
   FolderWaveTracker,
   rowSyncMark,
+  sidebarMarksVisible,
   type TreeSyncIndex,
 } from "../lib/syncRollup";
 import { embedDroppedFile } from "../lib/attachments";
@@ -220,6 +221,7 @@ export function FileTree() {
   const tree = useStore((s) => s.tree);
   const openNote = useStore((s) => s.openNote);
   const syncEnabled = useStore((s) => s.syncEnabled);
+  const syncStatus = useStore((s) => s.syncStatus);
   const locks = useStore((s) => s.locks);
   const lifts = useStore((s) => s.lifts);
   const vaultPresence = useStore((s) => s.vaultPresence);
@@ -316,6 +318,10 @@ export function FileTree() {
       lastWaveKeyRef.current = waveKey;
     }
     if (!syncEnabled) return null;
+    // No server contact yet this session ⇒ no marks (see `sidebarMarksVisible`).
+    // The wave tracker is left alone so the counters resume where they were
+    // once the channel comes back, rather than restarting at "0/N".
+    if (!sidebarMarksVisible(syncStatus)) return null;
     const index = buildTreeSyncIndex({
       docIdByPath,
       docSyncState,
@@ -323,7 +329,7 @@ export function FileTree() {
     });
     wavesRef.current.apply(index);
     return index;
-  }, [syncEnabled, docIdByPath, docSyncState, localNotePaths, vaultPath]);
+  }, [syncEnabled, syncStatus, docIdByPath, docSyncState, localNotePaths, vaultPath]);
 
   // ---- Row-order stability while something is syncing ------------------
   //
