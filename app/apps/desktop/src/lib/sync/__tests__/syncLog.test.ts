@@ -29,6 +29,7 @@ describe("SyncLog", () => {
     const entries = log.entries();
     expect(entries).toHaveLength(1);
     expect(entries[0].at).toBe(2_900);
+    expect(entries[0].count).toBe(3);
   });
 
   it("does not fold once the window has passed", () => {
@@ -52,12 +53,28 @@ describe("SyncLog", () => {
     expect(log.entries()).toHaveLength(4);
   });
 
-  it("only folds against the entry immediately before it", () => {
+  it("folds an alternating repeat inside the window and moves it to the end, counted", () => {
     const log = new SyncLog();
     log.push({ level: "warn", event: "offline", message: "Connection lost", at: 0 });
     log.push({ level: "info", event: "connect", message: "Connected", at: 100 });
     log.push({ level: "warn", event: "offline", message: "Connection lost", at: 200 });
-    expect(log.entries().map((e) => e.event)).toEqual(["offline", "connect", "offline"]);
+    log.push({ level: "info", event: "connect", message: "Connected", at: 300 });
+    const entries = log.entries();
+    expect(entries.map((e) => e.event)).toEqual(["offline", "connect"]);
+    expect(entries.map((e) => e.count)).toEqual([2, 2]);
+    expect(entries[1].at).toBe(300);
+  });
+
+  it("does not fold a repeat that is outside the window even when it is recent in the tape", () => {
+    const log = new SyncLog();
+    log.push({ level: "warn", event: "offline", message: "Connection lost", at: 0 });
+    log.push({
+      level: "warn",
+      event: "offline",
+      message: "Connection lost",
+      at: SYNC_LOG_COALESCE_MS + 1,
+    });
+    expect(log.entries().map((e) => e.count ?? 1)).toEqual([1, 1]);
   });
 
   it("notifies subscribers on push and clear, and stops after unsubscribe", () => {

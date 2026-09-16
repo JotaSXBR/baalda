@@ -29,7 +29,15 @@ export const SYNC_LOG_CAPACITY = 200;
  * sequence: a user watching the page sees the timestamp advance instead of a
  * new row, which is the honest rendering of "this is still happening".
  */
-export const SYNC_LOG_COALESCE_MS = 2_000;
+export const SYNC_LOG_COALESCE_MS = 60_000;
+
+/** How far back a repeat is looked for. Folding only against the immediately
+ *  preceding entry let two facts that alternate — "Connected" / "view-only" on
+ *  every reconnect — fill the page with pairs (23 lines in one minute, all
+ *  saying the same two things). A repeat now folds into its earlier twin
+ *  anywhere in the last few entries inside the window, and the fold is
+ *  COUNTED, so the line says "×8" instead of hiding how often it happened. */
+const SYNC_LOG_LOOKBACK = 12;
 
 /** What a repeat has to match to fold into the entry before it. `message` is in
  *  the key on purpose: two `push-failed`s for the same doc with different
@@ -70,9 +78,15 @@ export class SyncLog {
   push(entry: Omit<SyncLogEntry, "at"> & { at?: number }): void {
     const { at, ...rest } = entry;
     const stamp = at ?? Date.now();
-    const last = this.buf[this.buf.length - 1];
-    if (last && sameEvent(last, rest) && stamp - last.at <= SYNC_LOG_COALESCE_MS) {
-      last.at = stamp;
+    const from = Math.max(0, this.buf.length - SYNC_LOG_LOOKBACK);
+    for (let i = this.buf.length - 1; i >= from; i--) {
+      const prev = this.buf[i];
+      if (stamp - prev.at > SYNC_LOG_COALESCE_MS) break;
+      if (!sameEvent(prev, rest)) continue;
+      // Re-append rather than bump in place: the tape stays in time order, and
+      // the folded line surfaces where the latest repeat happened.
+      this.buf.splice(i, 1);
+      this.buf.push({ ...prev, at: stamp, count: (prev.count ?? 1) + 1 });
       this.emit();
       return;
     }

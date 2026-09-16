@@ -2524,7 +2524,7 @@ export class SyncManager implements InboundHost {
     if (!this.enabled || !scope || !scope.isCurrent()) return;
     const relPath = this.registry.pathForDocId(docId);
     if (!relPath) return;
-    this.note("info", "retry", `Retrying ${relPath}`, { docId, path: relPath });
+    this.note("info", "retry", "Retrying this note", { docId, path: relPath });
     this.permanentFailures.delete(docId);
     this.registry.unmarkPushed(docId);
     this.divergedDocs.add(docId);

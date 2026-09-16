@@ -317,6 +317,9 @@ export interface SyncLogEntry {
   message: string;
   docId?: string | null;
   path?: string | null;
+  /** How many times this exact event repeated inside the fold window (see
+   *  `syncLog.ts`); absent or 1 when it happened once. */
+  count?: number;
 }
 
 // ── Per-note inspector ────────────────────────────────────────────────────────

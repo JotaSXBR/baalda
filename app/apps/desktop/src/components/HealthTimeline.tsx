@@ -10,6 +10,9 @@ import { Chip, PathText } from "./HealthShared";
 
 /** Rendered at once. The buffer holds 200; a wall of them helps nobody. */
 const PAGE = 100;
+/** Lines shown before "Show all": enough to answer "what just happened"
+ *  without turning the page into a log viewer. */
+const COLLAPSED = 6;
 
 type Filter = "all" | "warn" | "error";
 
@@ -25,6 +28,7 @@ export function HealthTimeline({
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [limit, setLimit] = useState(PAGE);
+  const [expanded, setExpanded] = useState(false);
 
   const counts = useMemo(() => {
     let warn = 0;
@@ -53,7 +57,8 @@ export function HealthTimeline({
     return <p className="muted">Nothing yet this session.</p>;
   }
 
-  const page = shown.slice(0, limit);
+  const page = shown.slice(0, expanded ? limit : COLLAPSED);
+  const hidden = Math.max(0, shown.length - page.length);
   const days: Array<{ label: string; entries: SyncLogEntry[] }> = [];
   for (const e of page) {
     const label = dayLabel(e.at, now);
@@ -83,7 +88,7 @@ export function HealthTimeline({
       {page.length === 0 ? (
         <p className="muted">Nothing at this level.</p>
       ) : (
-        <div className="health-timeline">
+        <div className={`health-timeline${expanded ? " is-expanded" : ""}`}>
           {days.map((day) => (
             <div className="health-day" key={day.label}>
               <div className="health-day-label">{day.label}</div>
@@ -98,6 +103,14 @@ export function HealthTimeline({
                     />
                     <span className="health-log-body">
                       <span className="health-log-message">{e.message}</span>
+                      {(e.count ?? 1) > 1 && (
+                        <span
+                          className="health-log-count"
+                          title={`Happened ${e.count} times within a minute`}
+                        >
+                          ×{e.count}
+                        </span>
+                      )}
                       {e.path && (
                         <button
                           type="button"
@@ -117,15 +130,34 @@ export function HealthTimeline({
         </div>
       )}
 
-      {shown.length > limit && (
-        <button
-          type="button"
-          className="ghost-pill sm"
-          onClick={() => setLimit((n) => n + PAGE)}
-        >
-          Show older
-        </button>
-      )}
+      <div className="health-timeline-actions">
+        {!expanded && hidden > 0 && (
+          <button type="button" className="ghost-pill sm" onClick={() => setExpanded(true)}>
+            Show all {shown.length.toLocaleString()}
+          </button>
+        )}
+        {expanded && shown.length > limit && (
+          <button
+            type="button"
+            className="ghost-pill sm"
+            onClick={() => setLimit((n) => n + PAGE)}
+          >
+            Show older
+          </button>
+        )}
+        {expanded && (
+          <button
+            type="button"
+            className="ghost-pill sm"
+            onClick={() => {
+              setExpanded(false);
+              setLimit(PAGE);
+            }}
+          >
+            Show less
+          </button>
+        )}
+      </div>
     </>
   );
 }

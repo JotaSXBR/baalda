@@ -1089,6 +1089,31 @@
   padding-bottom: var(--sp-1);
   border-bottom: 1px solid var(--border);
 }
+/* Expanded, the tape scrolls inside a fixed box: a 200-line session must not
+   make the whole settings page 200 lines taller. */
+.health-timeline.is-expanded {
+  max-height: 420px;
+  overflow-y: auto;
+  padding-right: var(--sp-2);
+}
+.health-timeline-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+.health-timeline-actions:empty {
+  display: none;
+}
+.health-log-count {
+  flex: 0 0 auto;
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--bg-active);
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
 .health-log {
   margin: 0;
   padding: 0;
