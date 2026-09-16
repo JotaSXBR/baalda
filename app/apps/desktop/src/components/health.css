@@ -4,14 +4,18 @@
    someone opens it.
 
    Every colour comes from `styles/tokens.css`. The page has exactly one colour
-   idea: a row, a node, a bar segment or a badge declares `data-tone`, and the
-   two variables below resolve to the semantic pair for that tone. Both themes
-   then follow for free — there is no second palette to keep in step. */
+   idea: a row, a node, a bar segment, a tile or a badge declares `data-tone`,
+   and the two variables below resolve to the semantic pair for that tone. Both
+   themes then follow for free — there is no second palette to keep in step. */
 
 .health-tab {
   --tone: var(--text-tertiary);
   --tone-soft: var(--bg-active);
   display: block;
+  /* Named so every section can size itself against the settings CONTENT
+     column rather than the window: the card is 84vw, so a window query would
+     be measuring the wrong box. */
+  container: health / inline-size;
 }
 
 /* The one tone table. `busy` borrows the accent because motion is the accent's
@@ -61,20 +65,54 @@
   --tone-soft: var(--bg-subtle);
 }
 
+/* ── Section chrome ───────────────────────────────────────────────────────── */
+
 /* The settings card sets one vertical rhythm for every tab, but its rules reach
-   only DIRECT children of `.settings-content` (plus `.versioning-tab`, the other
-   tab that wraps itself in a div). This tab wraps too, so it restates the same
-   three margins here rather than reaching into `App.css` — same values, so the
-   sections line up with every other tab's. */
-.health-tab > .subhead {
-  margin: var(--sp-8) 0 var(--sp-3);
+   only DIRECT children of `.settings-content`. This tab wraps itself in a div
+   and then wraps each block in a `<section>`, so the rhythm is restated here —
+   same values, so the sections line up with every other tab's. */
+/* Roughly double the old gap. These are whole sections of a page, not rows of
+   a list: at `--sp-8` the Checks block read as a continuation of the issue list
+   above it. Rows INSIDE a section stay compact. */
+.health-section {
+  margin-top: calc(var(--sp-8) * 2);
 }
-.health-tab > .subhead:first-child {
-  margin-top: 0;
+.health-section:first-of-type {
+  margin-top: var(--sp-8);
 }
-.health-tab > .subhead + .muted,
-.health-tab > .subhead + .health-local-row {
+.health-section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
   margin-bottom: var(--sp-3);
+}
+.health-section-titles {
+  min-width: 0;
+}
+.health-section .subhead {
+  margin: 0;
+  color: var(--text-secondary);
+}
+.health-section-desc {
+  margin: 2px 0 0;
+  color: var(--text-tertiary);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-body);
+}
+.health-section-right {
+  flex-shrink: 0;
+}
+
+/* The small uppercase label above a block inside a panel or a tile group. */
+.health-eyebrow {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  margin-bottom: var(--sp-1);
 }
 
 /* ── Verdict card ─────────────────────────────────────────────────────────── */
@@ -117,6 +155,20 @@
   font-size: var(--fs-sm);
   line-height: var(--lh-body);
 }
+/* The server host. A long Railway subdomain at the end of a sentence reads as
+   a typo; as a chip it reads as a fact. */
+.health-host {
+  display: inline-block;
+  margin-left: var(--sp-2);
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  vertical-align: 1px;
+}
 .health-verdict-actions {
   display: flex;
   align-items: center;
@@ -124,13 +176,10 @@
   flex-wrap: wrap;
 }
 
-/* ── Pipeline diagram ─────────────────────────────────────────────────────── */
+/* ── Pipeline strip ───────────────────────────────────────────────────────── */
 
 .health-pipeline-wrap {
   margin-top: var(--sp-5);
-  /* Stacking is driven by the CARD's width, not the window's: the settings
-     content column is what the diagram has to fit inside. The media query
-     below is the fallback for a webview without container queries. */
   container-type: inline-size;
 }
 .health-pipeline {
@@ -146,6 +195,7 @@
   flex: 1 1 0;
   min-width: 0;
 }
+/* A status strip, not a diagram poster: two lines of text, ~64px tall. */
 .health-node {
   flex: 1 1 auto;
   min-width: 0;
@@ -153,7 +203,7 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  padding: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-surface);
@@ -178,7 +228,22 @@
 .health-node[data-focus] {
   background: var(--tone-soft);
 }
+/* A stage that is only here because it is broken says so, and is inset a step
+   so the three permanent cards still read as the shape of the pipeline. */
+.health-node[data-conditional] {
+  border-style: dashed;
+  border-color: var(--tone);
+  background: var(--tone-soft);
+}
+.health-node-top {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: 100%;
+  min-width: 0;
+}
 .health-node-dot {
+  flex: 0 0 auto;
   width: 8px;
   height: 8px;
   border-radius: var(--radius-pill);
@@ -194,12 +259,20 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 100%;
+  min-width: 0;
 }
 .health-node-headline {
   font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.health-node-note {
+  font-size: var(--fs-xs);
+  color: var(--tone);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -246,35 +319,8 @@
   margin-right: var(--sp-1);
 }
 
-/* Narrow card (or narrow window): the five stages become a column and the
-   edges turn vertical. */
+/* Narrow card: the stages become a column and the edges turn vertical. */
 @container (max-width: 520px) {
-  .health-pipeline {
-    flex-direction: column;
-  }
-  .health-stage-cell {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .health-edge {
-    flex: 0 0 16px;
-    width: 2px;
-    height: 16px;
-    margin-left: var(--sp-5);
-  }
-  .health-edge[data-broken] {
-    background-image: repeating-linear-gradient(
-      180deg,
-      var(--tone) 0 6px,
-      transparent 6px 12px
-    );
-    background-size: 2px 12px;
-  }
-  .health-edge[data-broken][data-state="busy"] {
-    animation-name: health-dash-y;
-  }
-}
-@media (max-width: 760px) {
   .health-pipeline {
     flex-direction: column;
   }
@@ -314,6 +360,8 @@
   gap: var(--sp-2);
   flex-wrap: wrap;
 }
+/* The bar and its legend share this wrapper so nothing can space the two
+   apart: the legend is the bar's key, not a paragraph under it. */
 .health-breakdown {
   display: block;
 }
@@ -328,16 +376,14 @@
   background: var(--tone);
   min-width: 2px;
 }
-.health-bar-caption {
-  margin: var(--sp-2) 0 0;
-  color: var(--text-secondary);
-  font-size: var(--fs-sm);
-}
 .health-legend-list {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  gap: var(--sp-2) var(--sp-4);
+  gap: var(--sp-2) var(--sp-3);
   margin: var(--sp-3) 0 0;
+  /* The chips ARE the numbers for this section — there is no lead line above
+     them any more, because it said each count a second time. */
   padding: 0;
   list-style: none;
   font-size: var(--fs-sm);
@@ -347,33 +393,39 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
+  padding: 2px var(--sp-2) 2px var(--sp-1);
+  border-radius: var(--radius-pill);
+  background: var(--bg-subtle);
 }
 .health-legend-list strong {
   color: var(--text-primary);
 }
 .health-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
   background: var(--tone);
 }
 
-/* ── Issues ───────────────────────────────────────────────────────────────── */
+/* ── Filter chips, search, bulk bar ───────────────────────────────────────── */
 
-.health-empty {
+.health-issue-toolbar {
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
-  color: var(--success);
-  font-size: var(--fs-sm);
-  padding: var(--sp-2) 0;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-3);
 }
 .health-chips {
   display: flex;
   gap: var(--sp-2);
-  margin-bottom: var(--sp-3);
+  flex-wrap: wrap;
 }
 .health-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
   padding: 3px var(--sp-3);
   border-radius: var(--radius-pill);
   border: 1px solid var(--border);
@@ -381,10 +433,16 @@
   color: var(--text-secondary);
   font-size: var(--fs-xs);
   cursor: pointer;
-  transition: background var(--t-fast) var(--ease);
+  transition:
+    background var(--t-fast) var(--ease),
+    color var(--t-fast) var(--ease);
 }
 .health-chip:hover {
   background: var(--bg-hover);
+}
+.health-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .health-chip.active {
   background: var(--accent-soft);
@@ -392,30 +450,133 @@
   color: var(--text-primary);
   font-weight: 600;
 }
+.health-chip-count {
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.health-chip.active .health-chip-count {
+  color: var(--accent);
+}
+.settings-page .health-search {
+  width: auto;
+  min-width: 200px;
+  flex: 0 1 260px;
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-3);
+}
+
+.health-bulkbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+}
+.health-bulk-count {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.health-selectall {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+/* ── Issues ───────────────────────────────────────────────────────────────── */
+
+.health-allclear {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border-radius: var(--radius-lg);
+  background: var(--success-soft);
+}
+.health-allclear-badge {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--success);
+}
+.health-allclear strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: var(--fs-md);
+}
+.health-allclear p {
+  margin: 2px 0 0;
+}
+
 .health-issues {
   margin: 0;
   padding: 0;
   list-style: none;
 }
 .health-issue {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-3);
-  padding: var(--sp-3) 0;
+  border-radius: var(--radius-md);
 }
 .health-issue + .health-issue {
   border-top: 1px solid var(--border);
 }
-.health-dot {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  margin-top: 5px;
-  border-radius: var(--radius-pill);
-  background: var(--warning);
+.health-issue-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
 }
-.health-dot[data-severity="error"] {
-  background: var(--danger);
+.health-issue-check {
+  flex: 0 0 auto;
+  margin-top: 6px;
+}
+/* The whole summary is the disclosure control, so the target is the row and
+   not a 12px chevron. */
+.health-issue-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: 0;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.health-issue-summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+/* A filled badge, not a hairline dot. A row that needs a person has to read as
+   a warning at a glance; the severity colour alone, at 8px, did not. */
+.health-issue-badge,
+.health-check-badge {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-pill);
+  background: var(--tone);
+  color: var(--text-on-accent);
+}
+.health-issue-badge {
+  margin-top: 1px;
 }
 .health-issue-main {
   flex: 1 1 auto;
@@ -429,7 +590,25 @@
   font-weight: 600;
   color: var(--text-primary);
 }
+/* "Needs you" is the louder of the two on purpose: a row that will fix itself
+   is information, a row that will not is a task. */
+.health-tag {
+  margin-right: var(--sp-2);
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.health-tag[data-auto] {
+  background: var(--bg-subtle);
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
 .health-path {
+  display: block;
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--text-tertiary);
@@ -438,37 +617,551 @@
   white-space: nowrap;
   max-width: 100%;
 }
+/* One line collapsed. The whole sentence is in the panel under the chevron,
+   and a row that wraps to three lines is what stopped this list being
+   scannable. */
 .health-why {
   font-size: var(--fs-sm);
   color: var(--text-secondary);
   line-height: var(--lh-body);
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
-.health-issue-actions {
+.health-chevron {
+  flex: 0 0 auto;
+  display: inline-flex;
+  margin-top: 2px;
+  color: var(--text-tertiary);
+  transition: transform var(--t-fast) var(--ease);
+}
+.health-chevron[data-open] {
+  transform: rotate(90deg);
+}
+.health-issue-primary {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  flex-shrink: 0;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  padding-top: 2px;
 }
 
-/* ── Stat tiles ───────────────────────────────────────────────────────────── */
+/* ── The expanded panel: the reasoning ────────────────────────────────────── */
 
+.health-issue-panel {
+  padding: var(--sp-4);
+  margin: 0 0 var(--sp-3) var(--sp-5);
+  border-radius: var(--radius-lg);
+  background: var(--bg-subtle);
+  animation: health-open var(--t-med) var(--ease);
+}
+@keyframes health-open {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+.health-reasoning {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-4);
+}
+.health-block p {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+}
+.health-fixes {
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+}
+.health-fixes li + li {
+  margin-top: var(--sp-1);
+}
+
+/* Where the content is. The one line on this page that answers "is my work
+   safe", so it gets its own colour rather than sitting in the grey run. */
+.health-safety {
+  margin: var(--sp-4) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  border-left: 3px solid var(--text-tertiary);
+  background: var(--bg-surface);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.health-safety[data-safety="only-here"] {
+  border-left-color: var(--warning);
+}
+.health-safety[data-safety="on-server"],
+.health-safety[data-safety="both"] {
+  border-left-color: var(--success);
+}
+.health-safety .health-eyebrow {
+  margin-bottom: 0;
+}
+
+.health-facts {
+  margin: var(--sp-4) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0;
+}
+.health-fact {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--border);
+}
+.health-fact:last-child {
+  border-bottom: none;
+}
+.health-fact dt {
+  flex: 0 0 9rem;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.health-fact dd {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.health-fact-value {
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.health-copy {
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  color: var(--text-tertiary);
+}
+.health-copy svg {
+  width: 13px;
+  height: 13px;
+}
+/* The inspector's card reads as a spec sheet, so its facts run in two columns
+   instead of one long ladder. */
+.health-facts-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  column-gap: var(--sp-5);
+}
+
+.health-remedies {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: var(--sp-4);
+}
+.health-owner-card {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+.health-owner-card a {
+  color: var(--link);
+}
+
+/* ── Checks ───────────────────────────────────────────────────────────────── */
+
+.health-checks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-md);
+  background: var(--tone-soft);
+}
+.health-checks-headline {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--tone);
+}
+.health-check-panel .health-fixes {
+  margin-bottom: var(--sp-3);
+}
+.health-check-group + .health-check-group {
+  margin-top: var(--sp-8);
+  padding-top: var(--sp-6);
+  border-top: 1px solid var(--border);
+}
+.health-checks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.health-check {
+  border-bottom: 1px solid var(--border);
+}
+.health-check:last-child {
+  border-bottom: none;
+}
+.health-check-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.health-check-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) 0;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.health-check-summary:disabled {
+  cursor: default;
+}
+.health-check-summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.health-check-glyph {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--tone);
+}
+/* A pass is a tick and a label. Its `looksFor` moved to the label's tooltip:
+   fifteen explanatory sentences stacked up is what made this list unreadable. */
+.health-check-tick {
+  flex: 0 0 auto;
+  width: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--success);
+}
+/* Housekeeping is a fact, not a fault, so it gets a filled dot rather than a
+   triangle — and a check that never ran gets the same shape, hollow. */
+.health-check-dot {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  margin: 0 5.5px;
+  border-radius: var(--radius-pill);
+  background: var(--tone);
+}
+.health-check-dot[data-hollow] {
+  background: transparent;
+  border: 1px solid var(--tone);
+}
+.health-check-label {
+  flex: 0 0 auto;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.health-check-note {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+/* A passing row states what was verified, quietly. Seeing "no case collisions"
+   is the point of listing all fifteen. */
+.health-check[data-passed] .health-check-label {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+/* The count as a filled pill in the severity colour. A bare grey "2" beside a
+   red row said nothing about how much trouble it was. */
+.health-check-count {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--tone);
+  color: var(--text-on-accent);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.health-check-bytes {
+  font-weight: 500;
+  opacity: 0.85;
+}
+/* One short line of cause on a failing row; the rest waits in the panel. */
+.health-check-why-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.health-check-panel {
+  padding: 0 0 var(--sp-4) calc(16px + var(--sp-3));
+  animation: health-open var(--t-med) var(--ease);
+}
+.health-check-why {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-body);
+  max-width: 68ch;
+}
+.health-check-items {
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+.health-check-items li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--border);
+}
+.health-check-items .health-path {
+  flex: 1 1 auto;
+}
+.health-check-detail {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+.health-check-item-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.health-check.is-skeleton {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0;
+}
+.health-check.is-skeleton .health-check-glyph,
+.health-check.is-skeleton .health-check-label {
+  display: block;
+  height: 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-active);
+  animation: health-pulse 1.4s var(--ease) infinite;
+}
+.health-check.is-skeleton .health-check-glyph {
+  width: 16px;
+}
+.health-check.is-skeleton .health-check-label {
+  width: 40%;
+}
+
+/* ── Inspector ────────────────────────────────────────────────────────────── */
+
+.health-inspector-field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: 480px;
+}
+.health-inspector-icon {
+  position: absolute;
+  left: var(--sp-3);
+  display: inline-flex;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+.settings-page .health-inspector-input {
+  padding-left: calc(var(--sp-3) + 22px);
+  border-radius: var(--radius-pill);
+}
+.health-suggest {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  left: 0;
+  right: 0;
+  z-index: 5;
+  margin: 0;
+  padding: var(--sp-1);
+  list-style: none;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+.health-suggest button {
+  display: block;
+  width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.health-suggest button:hover {
+  background: var(--bg-hover);
+}
+.health-suggest-title {
+  display: block;
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+}
+
+.health-inspection {
+  margin-top: var(--sp-4);
+  padding: var(--sp-4);
+  border-radius: var(--radius-lg);
+  background: var(--bg-subtle);
+  border-left: 3px solid var(--tone);
+}
+.health-inspection-verdict {
+  margin: 0 0 var(--sp-1);
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: var(--lh-tight);
+}
+
+/* ── Timeline ─────────────────────────────────────────────────────────────── */
+
+.health-timeline {
+  margin-top: var(--sp-3);
+}
+.health-day + .health-day {
+  margin-top: var(--sp-4);
+}
+.health-day-label {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+}
+.health-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.health-log-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: 3px 0;
+  font-size: var(--fs-sm);
+}
+.health-log-time {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.health-log-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--text-faint);
+  transform: translateY(-1px);
+}
+.health-log-dot[data-level="warn"] {
+  background: var(--warning);
+}
+.health-log-dot[data-level="error"] {
+  background: var(--danger);
+}
+.health-log-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.health-log-message {
+  color: var(--text-secondary);
+}
+.health-log-path {
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  min-width: 0;
+  max-width: 100%;
+}
+.health-log-path:hover .health-path {
+  color: var(--accent);
+}
+
+/* ── Vault at a glance ────────────────────────────────────────────────────── */
+
+.health-tile-group + .health-tile-group {
+  margin-top: var(--sp-4);
+}
 .health-tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: var(--sp-3);
   margin: 0;
   padding: 0;
   list-style: none;
 }
+@container health (max-width: 720px) {
+  .health-tiles {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  }
+}
+/* The tone is a 2px cap, not a grey box: it colours the card without turning
+   the section into a run of coloured blocks. */
 .health-tile {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: var(--sp-3) var(--sp-4);
   border-radius: var(--radius-md);
-  background: var(--bg-subtle);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+.health-tile::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: var(--tone);
+}
+.health-tile-icon {
+  display: inline-flex;
+  color: var(--tone);
+  margin-bottom: var(--sp-1);
 }
 .health-tile-value {
   font-family: var(--font-display);
@@ -491,6 +1184,9 @@
 }
 /* The census is one Rust pass, so the wait is short — the placeholder only has
    to hold the grid's shape, not entertain. */
+.health-tile.is-skeleton::before {
+  display: none;
+}
 .health-tile.is-skeleton .health-tile-value,
 .health-tile.is-skeleton .health-tile-label {
   display: block;
@@ -513,44 +1209,90 @@
   }
 }
 
-/* ── Activity ─────────────────────────────────────────────────────────────── */
+/* ── Activity strip ───────────────────────────────────────────────────────── */
 
-.health-activity {
-  display: block;
+.health-activity-lead {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
 }
-.health-bars {
+.health-weeks {
   display: flex;
-  align-items: flex-end;
   gap: var(--sp-2);
-  height: 72px;
-  padding: 0 2px;
 }
+/* Fill intensity, not bar height. A vault whose entire year landed in one week
+   used to draw eleven invisible stubs beside one block; every non-zero week is
+   legible here, and the count sits inside the cell. */
 .health-week {
+  position: relative;
   flex: 1 1 0;
-  min-width: 4px;
-  border-radius: var(--radius-sm) var(--radius-sm) 2px 2px;
-  background: var(--accent-soft);
+  min-width: 0;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+.health-week::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  opacity: 0;
+}
+.health-week[data-level="1"]::before {
+  opacity: 0.2;
+}
+.health-week[data-level="2"]::before {
+  opacity: 0.45;
+}
+.health-week[data-level="3"]::before {
+  opacity: 0.7;
+}
+.health-week[data-level="4"]::before {
+  opacity: 1;
+}
+.health-week[data-level="3"],
+.health-week[data-level="4"] {
+  color: var(--text-on-accent);
+  border-color: transparent;
 }
 .health-week[data-current] {
-  background: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
-.health-activity .health-detail {
-  margin-top: var(--sp-2);
+.health-week-n {
+  position: relative;
 }
-
-/* ── Largest tables ───────────────────────────────────────────────────────── */
-
-.health-largest {
+.health-weeks-axis {
   display: flex;
-  flex-direction: column;
-  gap: var(--sp-6);
+  justify-content: space-between;
+  margin-top: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
 }
-.health-table-title {
-  margin: 0 0 var(--sp-2);
-  font-family: var(--font-display);
-  font-size: var(--fs-md);
-  font-weight: 600;
-  color: var(--text-primary);
+
+/* ── Largest ──────────────────────────────────────────────────────────────── */
+
+/* A floor under the pane, so switching Notes → Files → History does not jump
+   the rest of the page up and down under the cursor. */
+.health-largest {
+  min-height: 240px;
+}
+.health-segmented {
+  display: inline-flex;
+  margin-bottom: var(--sp-3);
+}
+.health-segmented button {
+  flex: 0 0 auto;
+  padding: var(--sp-1) var(--sp-4);
 }
 .health-table {
   width: 100%;
@@ -587,9 +1329,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.health-path {
-  display: block;
-}
 .health-row-actions {
   width: 9.5rem;
   text-align: right;
@@ -605,8 +1344,17 @@
    pipeline stops, and the colour already said it. */
 @media (prefers-reduced-motion: reduce) {
   .health-edge,
+  .health-check.is-skeleton .health-check-glyph,
+  .health-check.is-skeleton .health-check-label,
   .health-tile.is-skeleton .health-tile-value,
   .health-tile.is-skeleton .health-tile-label {
     animation: none;
+  }
+  .health-issue-panel,
+  .health-check-panel {
+    animation: none;
+  }
+  .health-chevron {
+    transition: none;
   }
 }

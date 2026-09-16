@@ -64,6 +64,7 @@ const fakeRegistry = vi.hoisted(() => {
     }),
     setNoteMetaListener: vi.fn(),
     setColorListener: vi.fn(),
+    setFailureListener: vi.fn(),
     setInboundHost: vi.fn(),
     mappedNotes: vi.fn((): Array<{ docId: string; relPath: string }> => []),
     isPushed: vi.fn(() => false),

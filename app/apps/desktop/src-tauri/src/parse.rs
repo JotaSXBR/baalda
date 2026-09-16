@@ -53,7 +53,11 @@ static H1_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^#\s+(.+?)\s*$").unwra
 
 /// Split leading YAML frontmatter (`---\n … \n---`) from the body.
 /// Returns `(Some(yaml), body)` or `(None, whole_content)`.
-fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
+///
+/// `pub` so the Health page's `bad-frontmatter` check asks THIS function whether
+/// a file's block closes, rather than re-deriving the fence rules and drifting
+/// from what the indexer actually parsed.
+pub fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
     // Frontmatter must be the very first thing in the file.
     let rest = match content.strip_prefix("---\n") {
         Some(r) => r,
@@ -80,7 +84,11 @@ fn split_frontmatter(content: &str) -> (Option<&str>, &str) {
 
 /// Frontmatter above this size is ignored — real metadata is tiny, and a large
 /// blob is either junk or an attack. Bounds the bytes serde_yaml ever sees.
-const MAX_FRONTMATTER_BYTES: usize = 64 * 1024;
+///
+/// `pub` for the same reason as `split_frontmatter`: the `bad-frontmatter` check
+/// reports a block this cap silences, and must read the cap rather than repeat
+/// the number.
+pub const MAX_FRONTMATTER_BYTES: usize = 64 * 1024;
 /// Max YAML anchor/alias sigils (`&`/`*`) tolerated before we refuse to parse.
 /// serde_yaml (unsafe-libyaml) materializes every alias into an owned Value
 /// with no expansion limit, so nested anchors/aliases are a billion-laughs DoS

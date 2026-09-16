@@ -494,6 +494,8 @@ export class VaultRegistry {
    * that is what the sidebar draws with.
    */
   private onColors: ((colors: Record<string, string>) => void) | null = null;
+  /** Notified per recorded failure, in order (see {@link setFailureListener}). */
+  private onFailure: ((failure: RegistryFailure) => void) | null = null;
 
   constructor(
     private readonly api: ApiClient,
@@ -525,6 +527,19 @@ export class VaultRegistry {
   /** Subscribe to the vault's shared item colors (see {@link onColors}). */
   setColorListener(cb: ((colors: Record<string, string>) => void) | null): void {
     this.onColors = cb;
+  }
+
+  /**
+   * Subscribe to failures as they are recorded.
+   *
+   * {@link failures} is the accumulated list, which answers "what is broken
+   * now"; this answers "when, and in what order" — the difference between a
+   * Health page that can show a vault's sync history and one that can only show
+   * its current wreckage. Purely additive: the failure is recorded, badged and
+   * logged exactly as before whether or not anyone listens.
+   */
+  setFailureListener(cb: ((failure: RegistryFailure) => void) | null): void {
+    this.onFailure = cb;
   }
 
   /** Provide the editor/doc-store coupling inbound reconciliation needs. Without
@@ -852,6 +867,12 @@ export class VaultRegistry {
       );
     }
     if (f.docId) this.sink.doc(f.docId, "error");
+    // Timeline only — a listener must never be able to change what a run does.
+    try {
+      this.onFailure?.(f);
+    } catch (e) {
+      console.warn("[registry] failure listener threw", e);
+    }
     console.warn(`[registry] ${f.kind} ${f.path} failed — ${f.reason}`);
   }
 

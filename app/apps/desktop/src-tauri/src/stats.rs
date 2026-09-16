@@ -21,7 +21,7 @@
 //! surfaces it, and `otherFiles` is where the user should see it.
 
 use crate::error::AppResult;
-use crate::index::Index;
+use crate::index::{Index, NoteRow};
 use crate::vault::{is_ignored_name, rel_from_abs};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -34,6 +34,14 @@ use walkdir::WalkDir;
 /// `attachments.rs` confines every binary write to (`ensure_attachment_rel`);
 /// a file under it is an attachment, everything else is not.
 const ATTACHMENTS_DIR: &str = "attachments";
+
+/// The server's per-note ceiling. THE definition for the Rust side: `checks.rs`
+/// flags notes at or above it as unsyncable, and `index.rs`'s `MAX_INDEX_BYTES`
+/// is the same number for the same reason (a note too big to upload is a note
+/// too big to fully parse). Its TS twin is `MAX_NOTE_BYTES` in
+/// `src/lib/sync/contentUpload.ts`, which is in turn the server's `MAX_NOTE_MB`;
+/// all four move together or notes fail upload with no local warning.
+pub const MAX_NOTE_BYTES: i64 = 10 * 1024 * 1024;
 
 /// How many rows the "largest"/"heaviest" lists carry (the contract says 10).
 const TOP_N: usize = 10;
@@ -133,34 +141,45 @@ pub struct VaultStats {
     pub activity: ActivityStats,
 }
 
-/// Take the census. `index` must be the index of `vault` — the caller holds the
-/// index mutex for the duration, so this does no locking of its own.
-/// `live_docs` is the registry's doc-id map (`docId → relPath`) for the open
-/// vault. A note pulled down from the server can carry a registry doc id that
-/// differs from its local `notes.id`, so its history is keyed by an id the
-/// `notes` table has never heard of. Counting that as an orphan reported "18
-/// notes reclaimable" while the sweep — which unions the SAME registry ids into
-/// its live set (`crdtGc.ts`) — correctly removed nothing. Orphan here must mean
-/// exactly what `prune_yjs_docs` would remove, so the two agree by construction.
-pub fn collect(
-    vault: &Path,
-    index: &Index,
-    live_docs: &HashMap<String, String>,
-) -> AppResult<VaultStats> {
-    let computed_at = now_ms();
+/// ONE classified walk of the vault. Shared by this census and the integrity
+/// checks (`checks.rs`) so the two can never disagree about what a note is, what
+/// an attachment is, or which paths are ignored — a Health page whose "1,204
+/// notes" and "3 unindexed markdown files" came from different rules would be
+/// worse than no page.
+pub struct Census {
+    /// Files the index has a `notes` row for.
+    pub notes: Vec<SizedFile>,
+    /// Files under the vault-root `attachments/` store that are not notes.
+    pub attachments: Vec<SizedFile>,
+    /// Every other non-ignored file.
+    pub others: Vec<SizedFile>,
+    /// Vault-relative paths of every walked directory (ignored ones excluded).
+    pub folders: Vec<String>,
+    /// Every `notes` row, as the index holds it (`mtime` in SECONDS).
+    pub note_rows: Vec<NoteRow>,
+    /// `path → doc_id` for every `notes` row.
+    pub id_by_path: HashMap<String, String>,
+    /// `doc_id → path` for every `notes` row.
+    pub path_by_id: HashMap<String, String>,
+}
 
-    // What the index calls a note. This is the ONLY classifier: a `.md` file the
-    // index has not picked up yet counts as an "other file" until it does, which
-    // is exactly the discrepancy the Health page exists to surface.
-    let mut id_by_path: HashMap<String, String> = HashMap::new();
-    let mut path_by_id: HashMap<String, String> = HashMap::new();
-    for (id, path) in index.note_paths()? {
-        path_by_id.insert(id.clone(), path.clone());
-        id_by_path.insert(path, id);
+/// Walk `vault` once and classify everything in it. See [`Census`].
+///
+/// A file is a **note** exactly when the index has a `notes` row for its
+/// vault-relative path — never by extension. A `.md` file the index has not
+/// picked up yet lands in `others`, which is precisely the discrepancy
+/// `unindexed-markdown` reports.
+pub fn census_files(vault: &Path, index: &Index) -> AppResult<Census> {
+    let note_rows = index.note_rows()?;
+    let mut id_by_path: HashMap<String, String> = HashMap::with_capacity(note_rows.len());
+    let mut path_by_id: HashMap<String, String> = HashMap::with_capacity(note_rows.len());
+    for row in &note_rows {
+        path_by_id.insert(row.id.clone(), row.path.clone());
+        id_by_path.insert(row.path.clone(), row.id.clone());
     }
 
-    let mut folders = 0i64;
-    let mut notes: Vec<SizedFile> = Vec::with_capacity(id_by_path.len());
+    let mut folders: Vec<String> = Vec::new();
+    let mut notes: Vec<SizedFile> = Vec::with_capacity(note_rows.len());
     let mut attachments: Vec<SizedFile> = Vec::new();
     let mut others: Vec<SizedFile> = Vec::new();
     let attachments_prefix = format!("{ATTACHMENTS_DIR}/");
@@ -179,8 +198,11 @@ pub fn collect(
             continue; // the vault root is not one of its own folders
         }
         let file_type = entry.file_type();
+        let Ok(rel) = rel_from_abs(vault, entry.path()) else {
+            continue;
+        };
         if file_type.is_dir() {
-            folders += 1;
+            folders.push(rel);
             continue;
         }
         if !file_type.is_file() {
@@ -189,9 +211,6 @@ pub fn collect(
         // A file that vanished between the walk and the stat (a save in flight,
         // a sync materialising) is skipped rather than failing the whole census.
         let Ok(meta) = entry.metadata() else { continue };
-        let Ok(rel) = rel_from_abs(vault, entry.path()) else {
-            continue;
-        };
         let file = SizedFile {
             path: rel.clone(),
             bytes: meta.len() as i64,
@@ -205,6 +224,41 @@ pub fn collect(
             others.push(file);
         }
     }
+
+    Ok(Census {
+        notes,
+        attachments,
+        others,
+        folders,
+        note_rows,
+        id_by_path,
+        path_by_id,
+    })
+}
+
+/// Take the census. `index` must be the index of `vault` — the caller holds the
+/// index mutex for the duration, so this does no locking of its own.
+/// `live_docs` is the registry's doc-id map (`docId → relPath`) for the open
+/// vault. A note pulled down from the server can carry a registry doc id that
+/// differs from its local `notes.id`, so its history is keyed by an id the
+/// `notes` table has never heard of. Counting that as an orphan reported "18
+/// notes reclaimable" while the sweep — which unions the SAME registry ids into
+/// its live set (`crdtGc.ts`) — correctly removed nothing. Orphan here must mean
+/// exactly what `prune_yjs_docs` would remove, so the two agree by construction.
+pub fn collect(
+    vault: &Path,
+    index: &Index,
+    live_docs: &HashMap<String, String>,
+) -> AppResult<VaultStats> {
+    let computed_at = now_ms();
+    let Census {
+        notes,
+        attachments,
+        others,
+        folders,
+        path_by_id,
+        ..
+    } = census_files(vault, index)?;
 
     let note_stats = NoteStats {
         count: notes.len() as i64,
@@ -226,6 +280,7 @@ pub fn collect(
     let mut rest = attachments;
     rest.extend(others);
     let largest_files = top_files(rest);
+    let folders = folders.len() as i64;
 
     // ---- Index-side aggregates -------------------------------------------
     let link_counts = index.link_counts()?;
@@ -333,7 +388,7 @@ fn index_file_bytes(vault: &Path) -> i64 {
     total
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -388,11 +443,11 @@ mod tests {
 
     fn doc_id_of(index: &Index, rel: &str) -> String {
         index
-            .note_paths()
+            .note_rows()
             .unwrap()
             .into_iter()
-            .find(|(_, path)| path == rel)
-            .map(|(id, _)| id)
+            .find(|row| row.path == rel)
+            .map(|row| row.id)
             .expect("note should be indexed")
     }
 

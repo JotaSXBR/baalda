@@ -78,6 +78,7 @@ const sync = vi.hoisted(() => ({
   setRegistryMapListener: vi.fn(),
   setNoteMetaListener: vi.fn(),
   setColorListener: vi.fn(),
+  setFailureListener: vi.fn(),
   announcePresence: vi.fn(),
 }));
 

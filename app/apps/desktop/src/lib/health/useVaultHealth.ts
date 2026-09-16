@@ -18,8 +18,24 @@ import { collectCrdtGarbage } from "../sync/crdtGc";
 import { deletePaths } from "../vault/mutatePaths";
 import { removeFromOrder } from "../ordering";
 import { copyText } from "../clipboard";
-import { buildHealthReport, type HealthFailures, type HealthInput } from "./model";
-import type { HealthActions, VaultHealthSnapshot, VaultStats } from "./types";
+import { toast } from "../toast";
+import {
+  buildHealthReport,
+  composeInspectionVerdict,
+  ownerOf,
+  safetyLabel,
+  type HealthFailures,
+  type HealthInput,
+} from "./model";
+import type {
+  HealthActions,
+  HealthIssue,
+  NoteInspection,
+  SyncLogEntry,
+  VaultChecks,
+  VaultHealthSnapshot,
+  VaultStats,
+} from "./types";
 
 export interface UseVaultHealthOptions {
   /** Open the billing/upgrade surface. Absent ⇒ the `upgrade` remedy no-ops. */
@@ -44,8 +60,10 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   const docIdByPath = useStore((s) => s.docIdByPath);
   const docSyncState = useStore((s) => s.docSyncState);
   const titles = useStore((s) => s.titles);
+  const members = useStore((s) => s.members);
 
   const [stats, setStats] = useState<VaultStats | null>(null);
+  const [checks, setChecks] = useState<VaultChecks | null>(null);
   const [statsError, setStatsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   /** Bumped by `refresh()` and by any action that changes what a census would
@@ -62,6 +80,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
   useEffect(() => {
     if (!vaultPath) {
       setStats(null);
+      setChecks(null);
       setStatsError(null);
       setLoading(false);
       return;
@@ -90,6 +109,18 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       .finally(() => {
         if (live) setLoading(false);
       });
+    // The integrity checks are a SECOND pass, run alongside the census rather
+    // than after it: they are slower (they read every file) and the page's
+    // headline never waits on them. A failure blanks the checks card only — the
+    // census, the verdict and every remedy stay on screen.
+    void ipc
+      .vaultChecks(liveDocs, vaultEpoch)
+      .then((c) => {
+        if (live) setChecks(c);
+      })
+      .catch(() => {
+        if (live) setChecks(null);
+      });
     return () => {
       live = false;
     };
@@ -116,6 +147,39 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
 
   const localNotePaths = useMemo(() => titles.map((t) => t.path), [titles]);
 
+  // ── The sync timeline ──────────────────────────────────────────────────────
+  // A ring buffer the sync manager already keeps; this mirrors it into React
+  // state and follows it. Deliberately effect + state rather than
+  // `useSyncExternalStore`: `syncLog()` hands back a fresh array on every call,
+  // which a snapshot-comparing store would treat as a change on every render.
+  //
+  // Every call is guarded. The log is diagnostics — a sync manager that is not
+  // running (or an older one without this plumbing) must leave the page working,
+  // not throw it away.
+  const [log, setLog] = useState<SyncLogEntry[]>([]);
+  useEffect(() => {
+    let live = true;
+    const read = (): void => {
+      if (!live) return;
+      try {
+        setLog(syncManager.syncLog());
+      } catch {
+        /* no log available */
+      }
+    };
+    read();
+    let off: (() => void) | undefined;
+    try {
+      off = syncManager.onSyncLog(read);
+    } catch {
+      /* nothing to subscribe to */
+    }
+    return () => {
+      live = false;
+      off?.();
+    };
+  }, []);
+
   const report = useMemo(() => {
     const input: HealthInput = {
       syncEnabled,
@@ -132,6 +196,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
       localNotePaths,
       failures,
       stats,
+      members,
     };
     return buildHealthReport(input);
   }, [
@@ -148,6 +213,7 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     localNotePaths,
     failures,
     stats,
+    members,
   ]);
 
   // ── Actions ────────────────────────────────────────────────────────────────
@@ -228,6 +294,158 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
         await copyText(text);
         return text;
       },
+
+      async exportCopy(path: string) {
+        // The native save dialog decides the destination, so this can never
+        // write somewhere the user did not choose. Cancelling returns null and
+        // nothing is copied.
+        const st = useStore.getState();
+        const dest = await ipc.saveFile(basename(path));
+        if (!dest) return null;
+        await ipc.exportPath(path, dest, st.vault?.epoch);
+        toast(`Saved a copy to ${dest}`);
+        return dest;
+      },
+
+      async copyIssue(issue: HealthIssue) {
+        const text = await buildIssueReport(issue, reportRef.current.serverHost);
+        await copyText(text);
+        return text;
+      },
+
+      async reregister(path: string) {
+        // The same call `store.openNoteByPath` makes: the local index's doc_id
+        // goes with it so the server adopts THIS note's identity rather than
+        // forking a second one for the same file.
+        const meta = await ipc.getNoteMeta(path).catch(() => null);
+        const title = meta?.title ?? basename(path);
+        const mapping = await syncManager.registry.registerNote(path, title, meta?.id);
+        if (!mapping) {
+          throw new Error(
+            "This note couldn't be registered: the vault isn't reconciled with the " +
+              "server yet. Try again once the connection is back.",
+          );
+        }
+        // Registering creates the row; the content still has to be pushed, and
+        // this note is precisely one whose content the server has never had.
+        await syncManager.retryDoc(mapping.docId);
+        refresh();
+      },
+
+      async contactOwner() {
+        const st = useStore.getState();
+        const owner = ownerOf(st.members);
+        const vaultName = st.vault?.name ?? "this vault";
+        const me = st.session?.user.email;
+        const message =
+          `Hi${owner ? ` ${owner.name}` : ""},\n\n` +
+          `Could you give me access to the Baalda vault "${vaultName}"? ` +
+          `Right now the server refuses to sync it for me.` +
+          (me ? ` My account email is ${me}.` : "") +
+          `\n\nThanks!`;
+        await copyText(message);
+        return { owner, message };
+      },
+
+      async inspectNote(path: string): Promise<NoteInspection> {
+        const st = useStore.getState();
+        const epoch = st.vault?.epoch;
+        const report = reportRef.current;
+        const docId = st.docIdByPath[path] ?? null;
+
+        const [exists, meta] = await Promise.all([
+          ipc.noteExists(path, epoch).catch(() => false),
+          ipc.getNoteMeta(path).catch(() => null),
+        ]);
+
+        // Everything the sync layer already holds for this doc. A manager that
+        // is not running answers nothing rather than pretending: every field
+        // below then stays at its "we don't know" value, and the verdict says so.
+        let probe = {
+          pushed: false,
+          queued: false,
+          diverged: false,
+          permanentFailure: null as string | null,
+          emptyEverywhere: false,
+        };
+        if (docId) {
+          try {
+            probe = syncManager.inspectDoc(docId);
+          } catch {
+            /* nothing known */
+          }
+        }
+
+        let historyBytes: number | null = null;
+        if (docId) {
+          try {
+            const state = await ipc.loadYjsState(docId, epoch);
+            historyBytes =
+              (state.snapshot?.byteLength ?? 0) +
+              state.updates.reduce((n, u) => n + u.byteLength, 0);
+          } catch {
+            historyBytes = null;
+          }
+        }
+
+        // There is no cheap per-file size IPC, so the only honest source is the
+        // census's top-10 list. Absent ⇒ null, which the page renders as
+        // "not measured" rather than as a zero.
+        const bytes =
+          statsRef.current?.largestNotes.find((n) => n.path === path)?.bytes ?? null;
+
+        const issue =
+          report.issues.find(
+            (i) => (docId != null && i.docId === docId) || (i.path != null && i.path === path),
+          ) ?? null;
+
+        const state = docId ? (st.docSyncState[docId] ?? null) : null;
+
+        return {
+          path,
+          exists,
+          docId,
+          state,
+          pushed: probe.pushed,
+          queued: probe.queued,
+          diverged: probe.diverged,
+          permanentFailure: probe.permanentFailure,
+          emptyEverywhere: probe.emptyEverywhere,
+          bytes,
+          // Rust stores mtimes in SECONDS (`index.rs file_mtime`); everything on
+          // this page is ms since epoch. A 0 means "unknown", not 1970.
+          mtime: meta && meta.mtime > 0 ? meta.mtime * 1000 : null,
+          historyBytes,
+          verdict: composeInspectionVerdict({
+            exists,
+            syncEnabled: st.syncEnabled,
+            issue,
+            permanentFailure: probe.permanentFailure,
+            queued: probe.queued,
+            diverged: probe.diverged,
+            state,
+            pushed: probe.pushed,
+            docId,
+          }),
+          issue,
+        };
+      },
+
+      async emptyTrash() {
+        const st = useStore.getState();
+        const out = await ipc.emptyTrash(st.vault?.epoch);
+        refresh();
+        return out;
+      },
+
+      async rebuildIndex() {
+        const st = useStore.getState();
+        await ipc.rebuildIndex(st.vault?.epoch);
+        // The index is what the tree, search and half the census read from, so
+        // the page's own numbers are stale the moment this returns.
+        await st.refreshTree();
+        refresh();
+      },
     }),
     [refresh],
   );
@@ -246,7 +464,62 @@ export function useVaultHealth(options: UseVaultHealthOptions = {}): VaultHealth
     [actions, refresh],
   );
 
-  return { report, stats, statsError, loading, refresh, actions: wrapped };
+  return { report, stats, checks, statsError, loading, log, refresh, actions: wrapped };
+}
+
+/** The last path segment — what the save dialog should offer as a filename. */
+function basename(path: string): string {
+  const seg = path.split("/").pop();
+  return seg && seg !== "" ? seg : path;
+}
+
+// ── One issue, as text ────────────────────────────────────────────────────────
+
+/**
+ * What the `copy-details` remedy puts on the clipboard: everything the page says
+ * about ONE issue, in the order it says it, plus the two lines that make a
+ * report actionable (the app version and which server this vault talks to).
+ *
+ * The same honesty rule as the page: this is the explanation the user read, not
+ * a re-derivation of it, so a bug report and the screen can never disagree.
+ * No secrets — no token, no session, no note content.
+ */
+export async function buildIssueReport(
+  issue: HealthIssue,
+  serverHost: string | null,
+): Promise<string> {
+  let version = "unknown";
+  try {
+    version = await getVersion();
+  } catch {
+    /* not running under Tauri */
+  }
+
+  const lines: string[] = [];
+  lines.push(`Baalda — ${issue.title}`);
+  if (issue.path) lines.push(issue.path);
+  lines.push("");
+  lines.push(issue.why);
+  lines.push("");
+  lines.push("What this means");
+  lines.push(issue.explanation.meaning);
+  lines.push("");
+  lines.push("What Baalda does next");
+  lines.push(issue.explanation.next);
+  lines.push("");
+  lines.push("What you can do");
+  for (const fix of issue.explanation.fixes) lines.push(`- ${fix}`);
+  lines.push("");
+  lines.push("Where your content is");
+  lines.push(safetyLabel(issue.explanation.safety));
+  if (issue.facts.length > 0) {
+    lines.push("");
+    lines.push("Details");
+    for (const f of issue.facts) lines.push(`${f.label}: ${f.value}`);
+  }
+  lines.push("");
+  lines.push(`app ${version} · server ${serverHost ?? "(local only)"}`);
+  return lines.join("\n");
 }
 
 // ── Diagnostics bundle ────────────────────────────────────────────────────────

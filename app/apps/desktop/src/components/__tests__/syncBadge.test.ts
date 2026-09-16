@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isSyncRunActive,
+  syncBadgeAction,
   syncBadgeLabel,
   syncBadgeTone,
   syncRunPercent,
@@ -254,5 +255,46 @@ describe("syncBadgeLabel with a bulk sync run", () => {
     expect(syncRunPercent(run({ done: 500, total: 500 }))).toBe(100);
     // A denominator that shrank mid-run must not overflow the bar.
     expect(syncRunPercent(run({ done: 12, total: 10 }))).toBe(100);
+  });
+});
+
+/** What the pill offers after a run stops. The point of the split: a failed run
+ *  should EXPLAIN before it retries — the commonest failure is a note the server
+ *  refused for its size, where another attempt only re-fails it. */
+describe("syncBadgeAction", () => {
+  const base = { running: false, hasRetry: true, hasHealth: true };
+
+  it("offers 'See why' over 'Sync now' once a run has failed", () => {
+    const a = syncBadgeAction({ ...base, phase: "error", failed: 12 });
+    expect(a.kind).toBe("explain");
+    expect(a.cta).toBe("See why");
+    expect(a.title).toBe("12 notes didn't sync — open Health to see why");
+  });
+
+  it("still explains when the run failed without naming a single note", () => {
+    // The download watchdog: nothing individually failed, the app never reached
+    // the server. Health is still where the situation is described.
+    const a = syncBadgeAction({ ...base, phase: "error", failed: 0 });
+    expect(a.title).toBe("Sync didn't finish — open Health to see why");
+  });
+
+  it("falls back to the retry when the caller has no Health page to open", () => {
+    const a = syncBadgeAction({ ...base, hasHealth: false, phase: "error", failed: 3 });
+    expect(a).toEqual({ kind: "retry", cta: "Sync now", title: "Click to sync now" });
+  });
+
+  it("offers nothing while a run is live, or on any non-terminal phase", () => {
+    expect(syncBadgeAction({ ...base, running: true, phase: "error" }).kind).toBe("none");
+    for (const phase of ["idle", "registering", "uploading", "downloading", "done"]) {
+      expect(syncBadgeAction({ ...base, phase }).kind).toBe("none");
+    }
+    expect(syncBadgeAction({ ...base, phase: null }).kind).toBe("none");
+  });
+
+  it("offers nothing when the caller gave no action at all", () => {
+    expect(
+      syncBadgeAction({ running: false, phase: "error", hasRetry: false, hasHealth: false })
+        .kind,
+    ).toBe("none");
   });
 });

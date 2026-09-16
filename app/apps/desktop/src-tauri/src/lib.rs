@@ -3,6 +3,7 @@
 //! registered here and reacts to `files-changed` / `vault-opened` events.
 
 pub mod attachments;
+pub mod checks;
 mod commands;
 mod error;
 pub mod import_export;
@@ -182,6 +183,9 @@ pub fn run() {
             commands::write_binary_file,
             commands::list_attachments,
             commands::vault_stats,
+            commands::vault_checks,
+            commands::empty_trash,
+            commands::rebuild_index,
             commands::read_external_file,
             commands::get_server_url,
             commands::set_server_url,

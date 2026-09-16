@@ -12,7 +12,7 @@
 // Same reason both exist rather than one: they are different registers, not a
 // duplicated implementation.
 
-import type { HealthVerdict } from "./types";
+import type { HealthIssueKind, HealthVerdict } from "./types";
 
 const KB = 1024;
 const MB = KB * 1024;
@@ -121,4 +121,82 @@ export function verdictTone(
     case "local":
       return "muted";
   }
+}
+
+/**
+ * Which of a check's kinds a filter chip is offering, in the user's words.
+ * The model's `HealthIssueKind` is an engineer's vocabulary ("materialize-
+ * failed"); these are the four or five characters a chip can carry.
+ */
+export function kindLabel(kind: HealthIssueKind): string {
+  switch (kind) {
+    case "too-large":
+      return "Too large";
+    case "upload-failed":
+      return "Upload failed";
+    case "register-failed":
+      return "Not registered";
+    case "limit":
+      return "Plan limit";
+    case "unregistered":
+      return "Not on server yet";
+    case "no-access":
+      return "No access";
+    case "left-behind":
+      return "Left on disk";
+    case "materialize-failed":
+      return "Couldn't write";
+    case "orphan-history":
+      return "Leftover history";
+  }
+}
+
+/**
+ * The fill step of one cell in the activity strip: 0 for a week with nothing
+ * in it, then four levels up to the busiest week in the window.
+ *
+ * Buckets rather than a continuous opacity on purpose. The v1 chart scaled bar
+ * HEIGHT by the same ratio, and a vault whose whole year of edits landed in one
+ * week drew eleven invisible stubs beside one full-height block. Four steps
+ * against a coloured ground keep every non-zero week legible, and the count
+ * printed inside the cell carries the exact number anyway.
+ */
+export function activityLevel(count: number, max: number): 0 | 1 | 2 | 3 | 4 {
+  if (!Number.isFinite(count) || count <= 0) return 0;
+  if (!Number.isFinite(max) || max <= 0) return 1;
+  const ratio = Math.min(1, count / max);
+  if (ratio <= 0.25) return 1;
+  if (ratio <= 0.5) return 2;
+  if (ratio <= 0.75) return 3;
+  return 4;
+}
+
+/** "14:07" in the device's own timezone — the timeline's left column. */
+export function clockTime(ms: number): string {
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "--:--";
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/** Local calendar day, as a stable grouping key. */
+export function dayKey(ms: number): string {
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "unknown";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate(),
+  ).padStart(2, "0")}`;
+}
+
+const MONTHS = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/** The heading over one day of the timeline: "Today", "Yesterday", "12 Sep". */
+export function dayLabel(ms: number, now: number): string {
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "Unknown";
+  if (dayKey(ms) === dayKey(now)) return "Today";
+  if (dayKey(ms) === dayKey(now - 86_400_000)) return "Yesterday";
+  return `${d.getDate()} ${MONTHS[d.getMonth()]}`;
 }

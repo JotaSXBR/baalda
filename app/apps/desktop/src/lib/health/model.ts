@@ -18,12 +18,14 @@ import { buildTreeSyncIndex } from "../syncRollup";
 // "Last confirmed …" cannot phrase it differently from the table rows directly
 // under it. That module imports a type and nothing else, so this keeps the model
 // dependency-free.
-import { relativeTime } from "./format";
+import { formatBytes, relativeTime } from "./format";
 import { isBulkPhase, type DocSyncState, type SyncProgress } from "../sync/vaultScope";
 import type { SyncStatus } from "../sync/syncManager";
 import type { AuthStatus } from "../../store";
 import type {
   HealthCounts,
+  HealthExplanation,
+  HealthFact,
   HealthIssue,
   HealthRemedy,
   HealthReport,
@@ -92,6 +94,35 @@ export interface HealthInput {
   failures: HealthFailures;
   /** The Rust census, when it has landed. */
   stats: VaultStats | null;
+  /** `store.members` — the vault's roster, used ONLY to name the owner in an
+   *  access explanation ("Ask <name> …"). Structural on purpose so the model
+   *  needs no value import from `lib/api.ts`; absent ⇒ the explanations fall
+   *  back to "the vault's owner". */
+  members?: HealthMember[];
+}
+
+/** The one shape the model needs out of `api.Member`. */
+export interface HealthMember {
+  role: string;
+  user?: { name: string; email: string };
+}
+
+/** Who to ask for access. Null when the roster hasn't loaded or has no owner —
+ *  in which case every sentence says "the vault's owner" rather than guessing. */
+export function ownerOf(members: HealthMember[] | undefined): {
+  name: string;
+  email: string;
+} | null {
+  const owner = members?.find((m) => m.role === "owner");
+  const user = owner?.user;
+  if (!user) return null;
+  const name = user.name.trim() === "" ? user.email : user.name;
+  return { name, email: user.email };
+}
+
+/** "Ben (ben@example.com)" or "the vault's owner". */
+function ownerPhrase(owner: { name: string; email: string } | null): string {
+  return owner ? `${owner.name} (${owner.email})` : "the vault's owner";
 }
 
 // ── Small text helpers (deliberately `Intl`-free) ─────────────────────────────
@@ -126,48 +157,261 @@ export function isLimitCode(code: string | null | undefined): boolean {
 }
 
 /**
+ * The per-note ceiling, mirroring `sync/contentUpload.ts` `MAX_NOTE_BYTES` and
+ * the server's `MAX_NOTE_MB`. Mirrored rather than imported because that module
+ * pulls in Yjs and the provider, and this one is the dependency-free half that
+ * has to stay importable from a plain Node test. **Change one, change both.**
+ *
+ * It is only a fallback: when the sync layer's own reason carries the cap (it
+ * always does today) the issue quotes THAT number, so a server configured with
+ * a different `MAX_NOTE_MB` still reads correctly.
+ */
+export const NOTE_SIZE_LIMIT_MB = 10;
+
+interface TooLargeParse {
+  /** Which half is over the cap, per the reason the uploader recorded. */
+  cause: "history" | "file" | "unknown";
+  /** The measured size in MB, as the uploader formatted it. */
+  sizeMb: string | null;
+  capMb: string | null;
+}
+
+/**
  * Pull the two numbers out of `contentUpload.ts`'s too-large reason so the issue
  * can say "12.4 MB; the limit is 10 MB" in the user's own terms rather than
  * echoing an engineer's sentence. Two shapes exist — the FILE is over the cap,
  * or the doc's edit HISTORY is — and they have different remedies, so they are
  * told apart here rather than merged.
  */
-function describeTooLarge(reason: string): string {
+function parseTooLarge(reason: string): TooLargeParse {
   const m = /\(([\d.]+) MB( of edit history)?; the limit is (\d+) MB\)/.exec(reason);
-  if (!m) {
-    // Unknown wording: quote the sync layer rather than invent a number.
-    return `The server refused this note: ${reason}`;
-  }
+  if (!m) return { cause: "unknown", sizeMb: null, capMb: null };
   const [, size, history, cap] = m;
-  if (history) {
-    return (
-      `This note's edit history is ${size} MB; the server accepts up to ${cap} MB. ` +
-      `Resetting its history clears the history without touching the note's text.`
-    );
-  }
-  return (
-    `This note is ${size} MB; the server accepts up to ${cap} MB. ` +
-    `It has to get smaller before it can sync.`
-  );
+  return { cause: history ? "history" : "file", sizeMb: size, capMb: cap };
 }
 
-const TOO_LARGE_REMEDIES: HealthRemedy[] = ["open", "reveal", "reset-history", "delete"];
-const UPLOAD_REMEDIES: HealthRemedy[] = ["retry", "open", "reveal"];
+/** What the census knows about one note, when the census has landed and the note
+ *  is big enough to be in one of its top-10 lists. Both are `null` otherwise —
+ *  absence here is "not measured", never "small". */
+function censusSizes(
+  stats: VaultStats | null,
+  path: string | null,
+  docId: string | null,
+): { fileBytes: number | null; historyBytes: number | null } {
+  if (!stats) return { fileBytes: null, historyBytes: null };
+  const file = path ? stats.largestNotes.find((n) => n.path === path) : undefined;
+  const hist = docId ? stats.heaviestHistory.find((h) => h.docId === docId) : undefined;
+  return { fileBytes: file?.bytes ?? null, historyBytes: hist?.bytes ?? null };
+}
 
-function contentIssue(f: HealthContentFailure): HealthIssue {
-  if (f.permanent) {
-    return {
-      key: f.docId,
-      docId: f.docId,
-      path: f.relPath,
-      kind: "too-large",
-      severity: "error",
-      title: "Too large to sync",
-      why: describeTooLarge(f.reason),
-      remedies: TOO_LARGE_REMEDIES,
-      code: null,
-    };
+interface IssueContext {
+  stats: VaultStats | null;
+  owner: { name: string; email: string } | null;
+}
+
+function pathFact(path: string | null): HealthFact[] {
+  return path ? [{ label: "Path", value: path }] : [];
+}
+
+function docIdFact(docId: string | null): HealthFact[] {
+  return docId ? [{ label: "Doc id", value: docId, copyable: true }] : [];
+}
+
+function tooLargeIssue(f: HealthContentFailure, ctx: IssueContext): HealthIssue {
+  const parsed = parseTooLarge(f.reason);
+  const { fileBytes, historyBytes } = censusSizes(ctx.stats, f.relPath, f.docId);
+  const capMb = parsed.capMb ? Number(parsed.capMb) : NOTE_SIZE_LIMIT_MB;
+  const capBytes = capMb * 1024 * 1024;
+
+  // Three signals, in order of how much they actually know. The uploader's own
+  // reason says which half it measured over the cap. The census can then settle
+  // the case the reason cannot: a note whose FILE is comfortably under the cap
+  // but whose stored edit history is over it is a history problem, and telling
+  // someone to "split the note" there would send them to shorten a file that was
+  // never the reason. The census never promotes a file to the cause on its own
+  // absence — a note missing from the top-10 list is unmeasured, not small.
+  let cause: "history" | "file" | "unknown" = parsed.cause;
+  if (fileBytes != null && fileBytes > capBytes) cause = "file";
+  else if (
+    fileBytes != null &&
+    fileBytes <= capBytes &&
+    historyBytes != null &&
+    historyBytes > capBytes
+  ) {
+    cause = "history";
   }
+
+  const sizeText =
+    cause === "file" && parsed.sizeMb
+      ? `${parsed.sizeMb} MB`
+      : fileBytes != null
+        ? formatBytes(fileBytes)
+        : null;
+  const historyText =
+    historyBytes != null
+      ? formatBytes(historyBytes)
+      : cause === "history" && parsed.sizeMb
+        ? `${parsed.sizeMb} MB`
+        : null;
+
+  const why =
+    cause === "history"
+      ? `This note's edit history is ${historyText ?? "over the limit"}; the server ` +
+        `accepts up to ${capMb} MB per note. The note's own text is not the problem.`
+      : cause === "file"
+        ? `This note is ${sizeText ?? "over the limit"}; the server accepts up to ` +
+          `${capMb} MB. It has to get smaller before it can sync.`
+        : `The server refused this note as too large: ${f.reason}`;
+
+  const meaning =
+    cause === "history"
+      ? "Every edit Baalda has ever merged into this note is stored alongside it so " +
+        "offline changes can merge instead of overwriting. That stored history has " +
+        "grown past what the server accepts, so the note stops uploading. Your text " +
+        "is intact on this device; only the record of past edits is oversized."
+      : cause === "file"
+        ? "The note itself is bigger than one note is allowed to be on the server, " +
+          "usually because something large is pasted into the file rather than kept " +
+          "beside it. The server will not accept it at any size above the limit, so " +
+          "it stays on this device only."
+        : "The server refused this note because of its size. Baalda recorded the " +
+          "refusal but not which half was oversized.";
+
+  const fixes =
+    cause === "history"
+      ? [
+          "Reset this note's history — it clears the stored edit history and keeps " +
+            "the note's text exactly as it is. This is the fix in almost every case.",
+          "If it comes back, something is rewriting this note repeatedly (an " +
+            "automation or a script). Stop that first, then reset again.",
+        ]
+      : cause === "file"
+        ? [
+            "Move large embedded content (images, PDFs, pasted base64) out of the " +
+              "note and into the attachments folder, then link to it.",
+            "Split the note into several smaller notes.",
+            "Save a copy outside the vault, then shorten the note here.",
+          ]
+        : [
+            "Save a copy outside the vault so you have it, then reset this note's " +
+              "history and shorten the note.",
+          ];
+
+  const remedies: HealthRemedy[] =
+    cause === "history"
+      ? ["reset-history", "open", "reveal", "export-copy", "delete", "copy-details"]
+      : ["open", "reveal", "export-copy", "reset-history", "delete", "copy-details"];
+
+  const facts: HealthFact[] = [
+    ...pathFact(f.relPath),
+    { label: "Size", value: sizeText ?? "Not measured on this page" },
+    { label: "Limit", value: `${capMb} MB per note` },
+    ...(historyText ? [{ label: "History size", value: historyText }] : []),
+    ...docIdFact(f.docId),
+    { label: "Raw reason", value: f.reason, copyable: true },
+  ];
+
+  return {
+    key: f.docId,
+    docId: f.docId,
+    path: f.relPath,
+    kind: "too-large",
+    severity: "error",
+    title: "Too large to sync",
+    why,
+    remedies,
+    code: null,
+    explanation: {
+      meaning,
+      next: "Nothing — Baalda will not retry until the note is smaller.",
+      fixes,
+      safety: "only-here",
+    },
+    facts,
+    autoRetries: false,
+  };
+}
+
+/**
+ * Turn one of the sync layer's recorded reasons into a sentence that says what
+ * actually went wrong. Every shape matched here is a string that exists in
+ * `contentUpload.ts` (`fail(...)` call sites) or comes out of `syncManager.ts`,
+ * whose terminal statuses reject with the status as the message.
+ *
+ * Returns null for anything unrecognized — the issue then quotes the raw reason
+ * rather than inventing a cause for it.
+ */
+export function classifyUploadReason(reason: string): string | null {
+  const r = reason.trim().toLowerCase();
+  if (r.startsWith("open failed")) {
+    return (
+      "Baalda could not open this note's local copy to send it, so nothing was " +
+      "uploaded. That is usually a file permission problem or a note the local " +
+      "index and the disk disagree about."
+    );
+  }
+  if (r.includes("did not respond to the initial sync")) {
+    return (
+      "The connection opened, but the server never sent back what it already " +
+      "holds for this note. Baalda refuses to upload before it has read the " +
+      "server's copy, because uploading first is how two versions of a note end " +
+      "up merged into one doubled note. Usually the server was unreachable or " +
+      "too slow."
+    );
+  }
+  if (r.includes("did not acknowledge the content")) {
+    return (
+      "The content was sent, but the server never confirmed it had stored it. " +
+      "Baalda will not call a note synced on a guess, so it is reported as " +
+      "failed. A dropped connection or an overloaded server both look like this."
+    );
+  }
+  if (r === "no-access" || r.includes("403") || r.includes("forbidden")) {
+    return (
+      "The server refused this note: your access to it is view-only, or it has " +
+      "been withdrawn. Nothing you type here will reach the server until access " +
+      "is restored."
+    );
+  }
+  if (r === "deleted" || r.includes("404") || r.includes("not found")) {
+    return (
+      "The server has no row for this note any more — it was deleted there while " +
+      "this device still held it. Your copy is untouched on disk."
+    );
+  }
+  if (r === "too-large" || r.includes("too large")) {
+    return "The server refused this note because it is over the per-note size limit.";
+  }
+  if (r.includes("401") || r.includes("unauthor")) {
+    return (
+      "The server did not accept this device's sign-in. Signing out and back in " +
+      "usually clears it."
+    );
+  }
+  if (/\b5\d\d\b/.test(r) || r.includes("internal server error")) {
+    return "The server hit an error of its own while storing this note.";
+  }
+  if (r.includes("timed out") || r.includes("timeout")) {
+    return "The server took too long to answer, so Baalda stopped waiting.";
+  }
+  if (
+    r.includes("failed to fetch") ||
+    r.includes("load failed") ||
+    r.includes("network") ||
+    r.includes("econnrefused") ||
+    r.includes("enotfound") ||
+    r.includes("socket")
+  ) {
+    return "This device could not reach the server, so nothing was sent.";
+  }
+  if (r === "error") {
+    return "The connection Baalda opened for this note failed before the content landed.";
+  }
+  return null;
+}
+
+function uploadFailedIssue(f: HealthContentFailure): HealthIssue {
+  const cause = classifyUploadReason(f.reason);
   return {
     key: f.docId,
     docId: f.docId,
@@ -178,9 +422,34 @@ function contentIssue(f: HealthContentFailure): HealthIssue {
     why:
       `This note's content did not reach the server. ${capitalize(f.reason)} ` +
       `Its only copy is on this device.`,
-    remedies: UPLOAD_REMEDIES,
+    remedies: ["retry", "open", "reveal", "export-copy", "copy-details"],
     code: null,
+    explanation: {
+      meaning:
+        (cause ? `${cause} ` : `Baalda recorded: ${capitalize(f.reason)} `) +
+        "The note itself is safe: it is written to disk on this device exactly as " +
+        "you left it. What failed is the copy going to the server, so your other " +
+        "devices and your teammates do not have it yet.",
+      next: "Baalda retries on the next connect, and again the next time the file changes.",
+      fixes: [
+        "Retry now if you want it to go straight away.",
+        "Check you are online and that the server is reachable.",
+        "Save a copy outside the vault if this is work you cannot afford to lose " +
+          "while it is only on this device.",
+      ],
+      safety: "only-here",
+    },
+    facts: [
+      ...pathFact(f.relPath),
+      ...docIdFact(f.docId),
+      { label: "Last error", value: f.reason, copyable: true },
+    ],
+    autoRetries: true,
   };
+}
+
+function contentIssue(f: HealthContentFailure, ctx: IssueContext): HealthIssue {
+  return f.permanent ? tooLargeIssue(f, ctx) : uploadFailedIssue(f);
 }
 
 function capitalize(s: string): string {
@@ -190,26 +459,86 @@ function capitalize(s: string): string {
   return /[.!?]$/.test(head) ? head : `${head}.`;
 }
 
-function registryIssue(f: HealthRegistryFailure): HealthIssue {
-  const key = f.docId ?? f.path;
-  if (isLimitCode(f.code)) {
-    return {
-      key,
-      docId: f.docId,
-      path: f.path,
-      kind: "limit",
-      severity: "error",
-      title: "Plan limit reached",
-      why:
-        f.code === "member_limit_reached"
-          ? "This vault has as many members as the free plan allows, so the server " +
-            "refused. Upgrade to add more."
-          : "This account has as many vaults as the free plan allows, so the server " +
-            "refused to create more. Upgrade to keep syncing.",
-      remedies: ["upgrade"],
-      code: f.code,
-    };
+/**
+ * The one-line meaning of each `code` a create/move refusal can carry. These are
+ * the only codes the server emits with a body (`http/routes/registry.ts`), and
+ * the desktop's `registry.ts errorCode` is what puts them on the failure.
+ */
+function registerCodeMeaning(code: string | null, kind: "folder" | "note"): string | null {
+  switch (code) {
+    case "no_write_access":
+      return (
+        `Your access to this folder is view-only, so the server refused to create ` +
+        `the ${kind}.`
+      );
+    case "root_frozen":
+      return (
+        `This vault's top level is locked, so new items can only be created inside ` +
+        `a folder. Move this ${kind} into one and it will register.`
+      );
+    case "path_folder_mismatch":
+      return (
+        `The folder this ${kind} sits in on disk and the folder the server has ` +
+        `recorded for it disagree, so the server refused the request rather than ` +
+        `guess which one is right.`
+      );
+    case "doc_id_conflict":
+      return (
+        `This ${kind}'s id already belongs to a different vault on the server, so ` +
+        `it cannot be created here under the same id.`
+      );
+    default:
+      return null;
   }
+}
+
+function limitIssue(f: HealthRegistryFailure): HealthIssue {
+  const member = f.code === "member_limit_reached";
+  return {
+    key: f.docId ?? f.path,
+    docId: f.docId,
+    path: f.path,
+    kind: "limit",
+    severity: "error",
+    title: "Plan limit reached",
+    why: member
+      ? "This vault has as many members as the free plan allows, so the server " +
+        "refused. Upgrade to add more."
+      : "This account has as many vaults as the free plan allows, so the server " +
+        "refused to create more. Upgrade to keep syncing.",
+    remedies: ["upgrade", "copy-details"],
+    code: f.code,
+    explanation: {
+      meaning: member
+        ? "The free plan allows a limited number of people in one vault. This vault " +
+          "is at that number, so the server turned this request down. Nothing was " +
+          "lost — the work simply stopped at the gate."
+        : "The free plan allows a limited number of vaults per account. This account " +
+          "is at that number, so the server would not create another one. Nothing " +
+          "was lost — the work simply stopped at the gate.",
+      next: "Nothing — the server will refuse this the same way every time until the limit lifts.",
+      fixes: [
+        member
+          ? "Upgrade this vault to add more people."
+          : "Upgrade to create more vaults.",
+        member
+          ? "Or remove a member you no longer work with, which frees a seat."
+          : "Or delete a vault you no longer use, which frees a slot.",
+      ],
+      safety: "only-here",
+    },
+    facts: [
+      ...pathFact(f.path),
+      { label: "Limit", value: member ? "Members per vault" : "Vaults per account" },
+      { label: "Server code", value: f.code ?? "unknown", copyable: true },
+    ],
+    autoRetries: false,
+  };
+}
+
+function registryIssue(f: HealthRegistryFailure, ctx: IssueContext): HealthIssue {
+  const key = f.docId ?? f.path;
+  if (isLimitCode(f.code)) return limitIssue(f);
   if (f.kind === "materialize" || f.kind === "inbound") {
     return {
       key,
@@ -221,8 +550,31 @@ function registryIssue(f: HealthRegistryFailure): HealthIssue {
       why:
         `The server has this note, but it could not be written into your vault ` +
         `folder. ${capitalize(f.reason)}`,
-      remedies: ["retry"],
+      remedies: ["retry", "reveal", "copy-details"],
       code: f.code,
+      explanation: {
+        meaning:
+          "This note exists on the server and is safe there. What failed is the " +
+          "last step: writing it into your vault folder on this device. The usual " +
+          "causes are a folder this app is not allowed to write to, a filename this " +
+          "operating system will not accept, or a path that has grown too long.",
+        next: "Baalda tries again on the next sync pass.",
+        fixes: [
+          "Check the vault folder is writable and not inside a synced folder that " +
+            "locks files (some cloud drives do).",
+          "If the name contains characters this system rejects, rename the note on " +
+            "another device or on the server.",
+          "Shorten the folder path if it is very deep.",
+        ],
+        safety: "on-server",
+      },
+      facts: [
+        ...pathFact(f.path),
+        ...docIdFact(f.docId),
+        ...(f.code ? [{ label: "Server code", value: f.code, copyable: true }] : []),
+        { label: "Last error", value: f.reason, copyable: true },
+      ],
+      autoRetries: true,
     };
   }
   if (f.kind === "orphan") {
@@ -241,11 +593,41 @@ function registryIssue(f: HealthRegistryFailure): HealthIssue {
         `${capitalize(f.reason)} It was kept here rather than removed, because ` +
         `this device may hold the only copy. Open it to check, then delete it if ` +
         `you don't need it.`,
-      remedies: ["open", "reveal", "delete"],
+      remedies: ["open", "reveal", "reregister", "export-copy", "delete", "copy-details"],
       code: f.code,
+      explanation: {
+        meaning:
+          "The server no longer has this note. Either someone deleted it, or your " +
+          "access to it was withdrawn. Normally Baalda would remove the file here " +
+          "to match — but this device never got confirmation that the server had " +
+          "this note's content, so the copy in front of you may be the only one " +
+          "that exists. It was kept on purpose rather than deleted.",
+        next: "Nothing. Baalda will not remove it and will not re-upload it on its own.",
+        fixes: [
+          "Open it and decide whether you still want it.",
+          "Put it back on the server with Re-register, which creates a fresh note " +
+            "from this file and uploads it.",
+          "Save a copy outside the vault if you want it kept but not synced.",
+          "Delete it once you are sure you do not need it.",
+        ],
+        safety: "only-here",
+      },
+      facts: [
+        ...pathFact(f.path),
+        ...docIdFact(f.docId),
+        ...(f.code ? [{ label: "Server code", value: f.code, copyable: true }] : []),
+        { label: "Raw reason", value: f.reason, copyable: true },
+      ],
+      autoRetries: false,
     };
   }
   const isFolder = f.kind === "folder";
+  const what = isFolder ? "folder" : "note";
+  const coded = registerCodeMeaning(f.code, isFolder ? "folder" : "note");
+  const remedies: HealthRemedy[] = isFolder
+    ? ["retry", "reveal", "copy-details"]
+    : ["retry", "open", "reveal", "copy-details"];
+  if (f.code === "no_write_access") remedies.push("contact-owner");
   return {
     key,
     docId: f.docId,
@@ -254,10 +636,49 @@ function registryIssue(f: HealthRegistryFailure): HealthIssue {
     severity: "error",
     title: isFolder ? "Folder couldn't be registered" : "Couldn't be registered",
     why:
-      `The server has no row for this ${isFolder ? "folder" : "note"}, so nothing ` +
+      `The server has no row for this ${what}, so nothing ` +
       `under it can sync. ${capitalize(f.reason)}`,
-    remedies: isFolder ? ["retry", "reveal"] : UPLOAD_REMEDIES,
+    remedies,
     code: f.code,
+    explanation: {
+      meaning:
+        `Before anything can sync, the server needs a record that this ${what} ` +
+        `exists. That record could not be created, so this ${what} — and, for a ` +
+        `folder, everything inside it — stays on this device only. ` +
+        (coded ??
+          (f.code
+            ? `The server answered with "${f.code}".`
+            : "The server did not say why.")) +
+        (f.code === "no_write_access"
+          ? ` Ask ${ownerPhrase(ctx.owner)} for edit access.`
+          : ""),
+      next: "Baalda tries again on the next registry pass, which runs on every sync and whenever the folder changes.",
+      fixes:
+        f.code === "no_write_access"
+          ? [
+              `Ask ${ownerPhrase(ctx.owner)} to give you edit access to this folder.`,
+              "Until then, move the note to a folder you can write to and it will sync from there.",
+            ]
+          : f.code === "root_frozen"
+            ? [`Move this ${what} into a folder instead of the top level of the vault.`]
+            : f.code === "path_folder_mismatch"
+              ? [
+                  `Move the ${what} somewhere else and back, which re-states where it lives.`,
+                  "If it persists, report it with Copy details — the two records need reconciling server-side.",
+                ]
+              : [
+                  "Retry now.",
+                  "Check you are online and that you still have access to this vault.",
+                ],
+      safety: "only-here",
+    },
+    facts: [
+      ...pathFact(f.path),
+      ...docIdFact(f.docId),
+      ...(f.code ? [{ label: "Server code", value: f.code, copyable: true }] : []),
+      { label: "Last error", value: f.reason, copyable: true },
+    ],
+    autoRetries: true,
   };
 }
 
@@ -385,25 +806,28 @@ function buildIssues(
     seen.add(issue.key);
     issues.push(issue);
   };
+  const owner = ownerOf(input.members);
+  const issueCtx: IssueContext = { stats: input.stats, owner };
 
   // Content first: these are the failures that name a specific note whose only
   // copy is here.
-  for (const f of input.failures.content) push(contentIssue(f));
-  for (const f of input.failures.registry) push(registryIssue(f));
+  for (const f of input.failures.content) push(contentIssue(f, issueCtx));
+  for (const f of input.failures.registry) push(registryIssue(f, issueCtx));
 
   // A limit that stopped the run but was recorded against nothing the user can
   // see still has to be said once.
   if (isLimitCode(input.failures.limitCode) && !issues.some((i) => i.kind === "limit")) {
     push({
+      ...limitIssue({
+        kind: "note",
+        path: "",
+        docId: null,
+        reason: "plan limit",
+        code: input.failures.limitCode,
+      }),
       key: `limit:${input.failures.limitCode}`,
-      docId: null,
       path: null,
-      kind: "limit",
-      severity: "error",
-      title: "Plan limit reached",
       why: "The server stopped this sync run at a plan limit. Upgrade to continue.",
-      remedies: ["upgrade"],
-      code: input.failures.limitCode,
     });
   }
 
@@ -418,8 +842,29 @@ function buildIssues(
       why:
         "The server refused a sync token for this vault, so nothing is uploading " +
         "or downloading. Ask the vault's owner to share it with you again.",
-      remedies: [],
+      remedies: ["contact-owner", "copy-details"],
       code: null,
+      explanation: {
+        meaning:
+          "Every note asks the server for permission before it syncs, and the " +
+          "server is turning this vault down. That happens when the vault was set " +
+          "to Private, when it was shared read-only and then withdrawn, or when " +
+          `you were removed from it. Only ${ownerPhrase(owner)} can change that.`,
+        next: "Nothing until access is granted. Baalda keeps asking, and will resume on its own the moment the answer changes.",
+        fixes: [
+          `Ask ${ownerPhrase(owner)} to share this vault with you again.`,
+          "If you expected to be removed, your local files are still here and still yours to keep or export.",
+        ],
+        // Deliberately `unknown`: refused access means this device cannot ask
+        // the server what it holds, so claiming a copy is (or is not) up there
+        // would be a guess.
+        safety: "unknown",
+      },
+      facts: [
+        { label: "Vault", value: "Access refused by the server" },
+        ...(owner ? [{ label: "Owner", value: `${owner.name} (${owner.email})`, copyable: true }] : []),
+      ],
+      autoRetries: true,
     });
   }
 
@@ -450,12 +895,29 @@ function buildIssues(
           "and nothing has reported a failure. A sync run should pick it up.",
         remedies: ["retry", "open", "reveal"],
         code: null,
+        explanation: {
+          meaning:
+            "The server does not know this note yet. That is normal for a note " +
+            "created while you were offline, one added to the folder from outside " +
+            "Baalda a moment ago, or one whose registration is still queued behind " +
+            "others. Nothing has failed — it simply has not had its turn.",
+          next: "Registers on the next sync pass, then its content uploads straight after.",
+          fixes: [
+            "Wait — this usually clears itself within a few seconds of being connected.",
+            "Retry now if it has been sitting here.",
+            "If it never clears, Copy details from any other note on this page and report it.",
+          ],
+          safety: "only-here",
+        },
+        facts: [{ label: "Path", value: path }],
+        autoRetries: true,
       });
     }
   }
 
   const orphanDocs = input.stats?.history.orphanDocs ?? 0;
   if (orphanDocs > 0) {
+    const orphanBytes = input.stats?.history.orphanBytes ?? 0;
     push({
       key: "history:orphans",
       docId: null,
@@ -468,6 +930,27 @@ function buildIssues(
         `it no longer has. Reclaiming it frees the space and changes nothing you can see.`,
       remedies: ["reclaim"],
       code: null,
+      explanation: {
+        meaning:
+          "Baalda stores the edit history of each note so offline changes merge " +
+          "instead of overwriting each other. When a note leaves the vault, its " +
+          "history can be left behind. This is leftover storage and nothing else: " +
+          "no note is missing, nothing is at risk, and nothing is waiting to sync.",
+        next: "Nothing. It sits there taking up space until you reclaim it.",
+        fixes: [
+          "Reclaim it to free the space. Notes you still have are untouched.",
+          "Or leave it — it does no harm beyond the disk space.",
+        ],
+        // Nothing is at risk here, so neither "only-here" nor "on-server" is
+        // the honest word: this issue is about storage, not about a copy of
+        // anyone's work.
+        safety: "both",
+      },
+      facts: [
+        { label: "Leftover notes", value: num(orphanDocs) },
+        { label: "Space used", value: formatBytes(orphanBytes) },
+      ],
+      autoRetries: false,
     });
   }
 
@@ -700,4 +1183,71 @@ function describe(
         detail: `${last}${where}.${overflow}`,
       };
   }
+}
+
+/**
+ * "Where your content is", in words. One sentence per `safety` value, shared by
+ * the page and by the text `copyIssue` puts on the clipboard so a bug report and
+ * the screen cannot claim different things about the same note.
+ */
+export function safetyLabel(safety: HealthExplanation["safety"]): string {
+  switch (safety) {
+    case "only-here":
+      return "On this device only — the server has no confirmed copy of it.";
+    case "on-server":
+      return "On the server. What failed was writing it onto this device.";
+    case "both":
+      return "On this device and on the server.";
+    case "unknown":
+      return "Not known — Baalda cannot confirm right now where a copy exists.";
+  }
+}
+
+// ── Per-note inspector ────────────────────────────────────────────────────────
+
+/** Exactly the facts `useVaultHealth.inspectNote` has gathered, in the order the
+ *  verdict considers them. Kept pure so the one sentence a user reads about
+ *  their own note is unit-tested rather than assembled inside a hook. */
+export interface InspectVerdictInput {
+  /** Is there a file at this path right now? */
+  exists: boolean;
+  syncEnabled: boolean;
+  /** The Needs-attention row for this note, when it has one. */
+  issue: HealthIssue | null;
+  permanentFailure: string | null;
+  queued: boolean;
+  diverged: boolean;
+  state: DocSyncState | null;
+  /** The registry's durable "the server has this content" checkpoint. */
+  pushed: boolean;
+  docId: string | null;
+}
+
+/**
+ * ONE honest sentence about where this note stands.
+ *
+ * The order is the point. Each check below can be true at the same time as the
+ * ones under it, and the first true one is the one that changes what the reader
+ * should do — so a note with an issue says so even though it is also "not
+ * confirmed", and a note with no file at all never claims a sync state for a
+ * file that isn't there. Nothing here says "safe on the server" unless `pushed`
+ * or a `synced` report actually said so.
+ */
+export function composeInspectionVerdict(i: InspectVerdictInput): string {
+  if (!i.exists) return "There is no file at this path.";
+  if (!i.syncEnabled) return "This folder does not sync, so this note lives on this device only.";
+  if (i.issue) return `${i.issue.title} — see Needs attention above for what to do.`;
+  if (i.permanentFailure) {
+    return `Baalda stopped trying to sync this note: ${capitalize(i.permanentFailure)}`;
+  }
+  if (i.queued) return "Waiting to be pushed — it is in the queue for the next sync pass.";
+  if (i.diverged) return "Has edits the server may not have yet; the next sync pass will send them.";
+  if (i.state === "synced" && i.pushed) {
+    return "Synced — the server confirmed this note's content.";
+  }
+  if (i.pushed && i.state === null) {
+    return "On the server; nothing about it has changed since this app launched.";
+  }
+  if (i.docId === null) return "The server does not know this note yet.";
+  return "Not confirmed yet — nothing has reported this note's content as stored on the server.";
 }

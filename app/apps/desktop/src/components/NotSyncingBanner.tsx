@@ -81,10 +81,18 @@ export function notSyncingReason(args: {
 export function NotSyncingBannerView({
   reason,
   onSignIn,
+  onOpenHealth,
 }: {
   reason: NotSyncingReason | null;
   /** Opens the app's sign-in card. Only rendered for the signed-out reason. */
   onSignIn: () => void;
+  /**
+   * Opens the Health page. Offered alongside both reasons, never instead of the
+   * primary action: the banner names a fact, and Health is where the rest of the
+   * facts are — which notes are affected, what is only on this device, and what
+   * happens to them when access comes back.
+   */
+  onOpenHealth?: () => void;
 }) {
   return (
     <Banner show={reason != null} className="not-syncing-banner" role="alert">
@@ -99,11 +107,14 @@ export function NotSyncingBannerView({
           device until you sign in.
         </span>
       )}
-      {reason === "signed-out" && (
+      {reason != null && (onOpenHealth != null || reason === "signed-out") && (
         <div className="banner-actions">
-          <button className="primary" onClick={onSignIn}>
-            Sign in
-          </button>
+          {reason === "signed-out" && (
+            <button className="primary" onClick={onSignIn}>
+              Sign in
+            </button>
+          )}
+          {onOpenHealth != null && <button onClick={onOpenHealth}>Open Health</button>}
         </div>
       )}
     </Banner>

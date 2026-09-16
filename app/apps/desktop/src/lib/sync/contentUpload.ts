@@ -178,6 +178,16 @@ export interface ContentUploaderOptions {
    *  does not mean "nothing to send" — connect and flush regardless. */
   mustConnect?: (docId: string) => boolean;
   progress?: SyncProgressSink;
+  /**
+   * Called once per doc that could not be pushed, as it happens.
+   *
+   * {@link ContentUploader.failedDocs} already answers this at the END of a run,
+   * which is too late for a timeline: a run that is paused by the failure streak
+   * — or abandoned by a vault switch — never reports, and the user is left with
+   * a pill that says "not synced" and nothing that says why. Purely additive:
+   * the failure is recorded exactly as before whether or not anyone listens.
+   */
+  onFailure?: (failure: UploadFailure) => void;
   /** Abandon the run (vault switch). Checked before every doc. */
   shouldStop?: () => boolean;
   concurrency?: number;
@@ -536,7 +546,19 @@ export class ContentUploader {
     reason: string,
     opts: { permanent?: boolean } = {},
   ): void {
-    this.failures.push({ docId, relPath, reason, ...(opts.permanent ? { permanent: true } : {}) });
+    const failure: UploadFailure = {
+      docId,
+      relPath,
+      reason,
+      ...(opts.permanent ? { permanent: true } : {}),
+    };
+    this.failures.push(failure);
+    // A listener must never be able to change what the run does next.
+    try {
+      this.opts.onFailure?.(failure);
+    } catch (e) {
+      console.warn("[upload] failure listener threw", e);
+    }
     this.progress.doc(docId, "error");
     this.progress.item("failed");
     // A permanent failure says nothing about the server's health, so it must

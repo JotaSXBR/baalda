@@ -7,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { decodeStateVectors, decodeYjsState, frame, type YjsState } from "./ipcCodec";
-import type { VaultStats } from "./health/types";
+import type { VaultChecks, VaultStats } from "./health/types";
 
 // The binary commands (CRDT state, attachment bytes) speak raw bytes, framed by
 // `ipcCodec.ts` — see that module for why and for the frame layouts.
@@ -568,6 +568,38 @@ export const listAttachments = (expectedEpoch?: VaultEpoch) =>
  */
 export const vaultStats = (liveDocs: Record<string, string>, expectedEpoch?: VaultEpoch) =>
   invoke<VaultStats>("vault_stats", { liveDocs, expectedEpoch: expectedEpoch ?? null });
+
+/**
+ * The integrity half of the Health page: fifteen checks over the same vault —
+ * empty/unreadable/oversized notes, bad frontmatter, case collisions, names
+ * Windows refuses, a stale index, broken links and embeds, duplicate titles,
+ * heavy or orphaned CRDT history, and the recovery copies in `.context/trash`.
+ *
+ * Every check id comes back on every call, even at count 0, in the
+ * `VaultCheckId` order — a check missing from `results` means Rust could not run
+ * it, never that the vault is clean. `count` is the true total; `items` is
+ * capped at 25 examples.
+ *
+ * Heavier than {@link vaultStats}: it reads note CONTENTS, though nothing at or
+ * above the server's 10 MB cap and no embed scan past 2 MB. Run it on demand,
+ * not on a timer. `liveDocs` means what it means there.
+ */
+export const vaultChecks = (liveDocs: Record<string, string>, expectedEpoch?: VaultEpoch) =>
+  invoke<VaultChecks>("vault_checks", { liveDocs, expectedEpoch: expectedEpoch ?? null });
+
+/** Delete every recovery copy under `.context/trash`. The directory survives so
+ *  the next delete has somewhere to go; no note is ever touched. */
+export const emptyTrash = (expectedEpoch?: VaultEpoch) =>
+  invoke<{ filesRemoved: number; bytesFreed: number }>("empty_trash", {
+    expectedEpoch: expectedEpoch ?? null,
+  });
+
+/** Re-reconcile the index against the `.md` files — the remedy for the
+ *  `stale-index` and `unindexed-markdown` checks. Incremental and doc_id-preserving
+ *  (it is not a drop-and-recreate), and it leaves the CRDT tables alone. Resolves
+ *  once the rebuild has committed, then `index-ready` refreshes titles/backlinks. */
+export const rebuildIndex = (expectedEpoch?: VaultEpoch) =>
+  invoke<void>("rebuild_index", { expectedEpoch: expectedEpoch ?? null });
 
 /** Read a dropped/picked host file by absolute path (not vault-scoped). */
 export const readExternalFile = (path: string) =>

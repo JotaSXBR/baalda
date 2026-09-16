@@ -6,7 +6,14 @@
 // problem actually is.
 
 import { describe, expect, it } from "vitest";
-import { buildHealthReport, isLimitCode, MAX_UNREGISTERED_ISSUES, num } from "../model";
+import {
+  buildHealthReport,
+  classifyUploadReason,
+  isLimitCode,
+  MAX_UNREGISTERED_ISSUES,
+  num,
+  ownerOf,
+} from "../model";
 import type { HealthInput } from "../model";
 import type { VaultStats } from "../types";
 
@@ -28,6 +35,27 @@ function input(over: Partial<HealthInput> = {}): HealthInput {
     localNotePaths: [],
     failures: { registry: [], content: [], limitCode: null },
     stats: null,
+    ...over,
+  };
+}
+
+/** A census with plausible defaults; override only the field under test. */
+function statsWith(over: Partial<VaultStats> = {}): VaultStats {
+  return {
+    computedAt: NOW,
+    notes: { count: 10, bytes: 50_000, empty: 0 },
+    folders: 2,
+    attachments: { count: 0, bytes: 0 },
+    otherFiles: { count: 0, bytes: 0 },
+    tags: 4,
+    links: 9,
+    brokenLinks: 0,
+    index: { bytes: 100_000 },
+    history: { docs: 10, updates: 100, bytes: 200_000, orphanDocs: 0, orphanBytes: 0 },
+    largestNotes: [],
+    largestFiles: [],
+    heaviestHistory: [],
+    activity: { modifiedLast7d: 1, modifiedLast30d: 2, weeks: [] },
     ...over,
   };
 }
@@ -104,7 +132,7 @@ describe("verdict precedence", () => {
     expect(issue).toBeDefined();
     expect(issue?.docId).toBeNull();
     expect(issue?.path).toBeNull();
-    expect(issue?.remedies).toEqual([]);
+    expect(issue?.remedies).toEqual(["contact-owner", "copy-details"]);
     expect(stage(r, "connection").state).toBe("error");
   });
 
@@ -219,7 +247,14 @@ describe("content failures", () => {
     const i = r.issues[0];
     expect(i.kind).toBe("too-large");
     expect(i.severity).toBe("error");
-    expect(i.remedies).toEqual(["open", "reveal", "reset-history", "delete"]);
+    expect(i.remedies).toEqual([
+      "open",
+      "reveal",
+      "export-copy",
+      "reset-history",
+      "delete",
+      "copy-details",
+    ]);
     expect(i.remedies).not.toContain("retry");
     // The size and the cap, in the user's terms rather than the engineer's.
     expect(i.why).toContain("12.4 MB");
@@ -231,7 +266,10 @@ describe("content failures", () => {
       input({ failures: { registry: [], content: [tooLargeHistory], limitCode: null } }),
     );
     expect(r.issues[0].why).toContain("edit history is 17.2 MB");
-    expect(r.issues[0].why).toContain("without touching the note's text");
+    expect(r.issues[0].why).toContain("The note's own text is not the problem");
+    // History is the cause, so the fix that clears history leads.
+    expect(r.issues[0].remedies[0]).toBe("reset-history");
+    expect(r.issues[0].explanation.fixes[0]).toContain("Reset this note's history");
   });
 
   it("quotes the sync layer verbatim when the reason has an unexpected shape", () => {
@@ -260,7 +298,7 @@ describe("content failures", () => {
     );
     const i = r.issues[0];
     expect(i.kind).toBe("upload-failed");
-    expect(i.remedies).toEqual(["retry", "open", "reveal"]);
+    expect(i.remedies).toEqual(["retry", "open", "reveal", "export-copy", "copy-details"]);
     expect(i.why).toContain("Socket closed.");
     expect(i.why).toContain("only copy is on this device");
   });
@@ -293,7 +331,7 @@ describe("registry failures", () => {
       }),
     );
     const i = r.issues.find((x) => x.kind === "limit");
-    expect(i?.remedies).toEqual(["upgrade"]);
+    expect(i?.remedies).toEqual(["upgrade", "copy-details"]);
     expect(i?.code).toBe("vault_limit_reached");
     // One limit conversation, not two: the vault-level fallback must not double up.
     expect(r.issues.filter((x) => x.kind === "limit")).toHaveLength(1);
@@ -306,7 +344,7 @@ describe("registry failures", () => {
     const i = r.issues.find((x) => x.kind === "limit");
     expect(i).toBeDefined();
     expect(i?.path).toBeNull();
-    expect(i?.remedies).toEqual(["upgrade"]);
+    expect(i?.remedies).toEqual(["upgrade", "copy-details"]);
   });
 
   it("maps note/folder failures to `register-failed` and materialize/inbound to `materialize-failed`", () => {
@@ -326,13 +364,18 @@ describe("registry failures", () => {
     );
     const byPath = new Map(r.issues.map((i) => [i.path, i]));
     expect(byPath.get("a/N.md")?.kind).toBe("register-failed");
-    expect(byPath.get("a/N.md")?.remedies).toEqual(["retry", "open", "reveal"]);
+    expect(byPath.get("a/N.md")?.remedies).toEqual([
+      "retry",
+      "open",
+      "reveal",
+      "copy-details",
+    ]);
     expect(byPath.get("a")?.kind).toBe("register-failed");
     // A folder has nothing to open in the editor.
-    expect(byPath.get("a")?.remedies).toEqual(["retry", "reveal"]);
+    expect(byPath.get("a")?.remedies).toEqual(["retry", "reveal", "copy-details"]);
     expect(byPath.get("b/M.md")?.kind).toBe("materialize-failed");
     expect(byPath.get("c/I.md")?.kind).toBe("materialize-failed");
-    expect(byPath.get("b/M.md")?.remedies).toEqual(["retry"]);
+    expect(byPath.get("b/M.md")?.remedies).toEqual(["retry", "reveal", "copy-details"]);
   });
 
   it("surfaces an `orphan` as a file kept on disk whose only copy may be here", () => {
@@ -360,7 +403,14 @@ describe("registry failures", () => {
     const i = r.issues[0];
     expect(i.kind).toBe("left-behind");
     expect(i.severity).toBe("error");
-    expect(i.remedies).toEqual(["open", "reveal", "delete"]);
+    expect(i.remedies).toEqual([
+      "open",
+      "reveal",
+      "reregister",
+      "export-copy",
+      "delete",
+      "copy-details",
+    ]);
     expect(i.why).toContain("may hold the only copy");
   });
 });
@@ -619,5 +669,397 @@ describe("formatting helpers", () => {
     const r = buildHealthReport(input({ serverUrl: "not a url", ...healthyVault(1) }));
     expect(r.serverHost).toBeNull();
     expect(r.detail).not.toContain("·");
+  });
+});
+
+// ── Reasoning ─────────────────────────────────────────────────────────────────
+//
+// The page's whole point: a note that did not sync has to say WHY, in words
+// someone who does not know what a CRDT is can act on. Every kind gets the same
+// four promises — what this means, what Baalda does next, what you can do, where
+// your content is — and the last one is a safety claim, so these tests are the
+// guard against the page ever saying "safe on the server" about a note nothing
+// confirmed.
+
+describe("explanations", () => {
+  const issueOf = (over: Partial<HealthInput>, kind: string) => {
+    const r = buildHealthReport(input(over));
+    const i = r.issues.find((x) => x.kind === kind);
+    if (!i) throw new Error(`no ${kind} issue`);
+    return i;
+  };
+
+  /** Every issue, whatever its kind, keeps the four promises. */
+  function expectWellFormed(i: ReturnType<typeof issueOf>): void {
+    expect(i.explanation.meaning.length).toBeGreaterThan(20);
+    expect(i.explanation.next.length).toBeGreaterThan(5);
+    expect(i.explanation.fixes.length).toBeGreaterThan(0);
+    for (const f of i.explanation.fixes) expect(f.trim()).not.toBe("");
+    expect(["only-here", "on-server", "both", "unknown"]).toContain(i.explanation.safety);
+    expect(Array.isArray(i.facts)).toBe(true);
+    expect(typeof i.autoRetries).toBe("boolean");
+  }
+
+  it("gives every kind an explanation, facts and an honest auto-retry flag", () => {
+    const r = buildHealthReport(
+      input({
+        syncStatus: "no-access",
+        failures: {
+          registry: [
+            { kind: "note", path: "a/N.md", docId: "d1", reason: "500", code: null },
+            { kind: "materialize", path: "b/M.md", docId: "d2", reason: "EACCES", code: null },
+            { kind: "orphan", path: "Gone.md", docId: "d7", reason: "revoked", code: null },
+            { kind: "note", path: "c/L.md", docId: "d8", reason: "402", code: "vault_limit_reached" },
+          ],
+          content: [
+            { docId: "d3", relPath: "Big.md", reason: "too large to sync (12.4 MB; the limit is 10 MB)", permanent: true },
+            { docId: "d4", relPath: "A.md", reason: "socket closed" },
+          ],
+          limitCode: null,
+        },
+        stats: statsWith({ history: { docs: 3, updates: 9, bytes: 900, orphanDocs: 2, orphanBytes: 400 } }),
+      }),
+    );
+    const kinds = new Set(r.issues.map((i) => i.kind));
+    for (const want of [
+      "too-large",
+      "upload-failed",
+      "register-failed",
+      "materialize-failed",
+      "left-behind",
+      "limit",
+      "no-access",
+      "orphan-history",
+    ]) {
+      expect(kinds).toContain(want);
+    }
+    for (const i of r.issues) expectWellFormed(i);
+  });
+
+  it("only promises a copy on the server where one is confirmed to be", () => {
+    // `materialize-failed` is the ONE kind whose content genuinely is upstream:
+    // the server has it and the write to disk is what failed. Everything else
+    // that names a note must say the copy is here only, or say it doesn't know.
+    const mat = issueOf(
+      {
+        failures: {
+          registry: [{ kind: "materialize", path: "b/M.md", docId: "d2", reason: "EACCES", code: null }],
+          content: [],
+          limitCode: null,
+        },
+      },
+      "materialize-failed",
+    );
+    expect(mat.explanation.safety).toBe("on-server");
+
+    const up = issueOf(
+      {
+        failures: {
+          registry: [],
+          content: [{ docId: "d1", relPath: "A.md", reason: "socket closed" }],
+          limitCode: null,
+        },
+        },
+      "upload-failed",
+    );
+    expect(up.explanation.safety).toBe("only-here");
+
+    // Refused access means we cannot ask the server anything, so neither claim
+    // would be honest.
+    const na = issueOf({ syncStatus: "no-access" }, "no-access");
+    expect(na.explanation.safety).toBe("unknown");
+  });
+
+  it("flags auto-retry only where the sync layer really does try again", () => {
+    const permanent = issueOf(
+      {
+        failures: {
+          registry: [],
+          content: [
+            { docId: "d", relPath: "Big.md", reason: "too large to sync (12.4 MB; the limit is 10 MB)", permanent: true },
+          ],
+          limitCode: null,
+        },
+      },
+      "too-large",
+    );
+    expect(permanent.autoRetries).toBe(false);
+    expect(permanent.explanation.next).toContain("Nothing");
+
+    const transient = issueOf(
+      {
+        failures: {
+          registry: [],
+          content: [{ docId: "d", relPath: "A.md", reason: "socket closed" }],
+          limitCode: null,
+        },
+      },
+      "upload-failed",
+    );
+    expect(transient.autoRetries).toBe(true);
+
+    const limit = issueOf(
+      { failures: { registry: [], content: [], limitCode: "member_limit_reached" } },
+      "limit",
+    );
+    expect(limit.autoRetries).toBe(false);
+
+    const leftBehind = issueOf(
+      {
+        failures: {
+          registry: [{ kind: "orphan", path: "Gone.md", docId: "d7", reason: "revoked", code: null }],
+          content: [],
+          limitCode: null,
+        },
+      },
+      "left-behind",
+    );
+    expect(leftBehind.autoRetries).toBe(false);
+
+    const unregistered = issueOf(
+      { localNotePaths: ["New.md"], docIdByPath: {} },
+      "unregistered",
+    );
+    expect(unregistered.autoRetries).toBe(true);
+    expect(unregistered.explanation.next).toContain("next sync pass");
+  });
+
+  it("carries the copyable facts a bug report needs", () => {
+    const i = issueOf(
+      {
+        failures: {
+          registry: [],
+          content: [
+            {
+              docId: "doc-9",
+              relPath: "Notes/Big.md",
+              reason: "too large to sync (12.4 MB; the limit is 10 MB)",
+              permanent: true,
+            },
+          ],
+          limitCode: null,
+        },
+      },
+      "too-large",
+    );
+    const labels = i.facts.map((f) => f.label);
+    expect(labels).toContain("Path");
+    expect(labels).toContain("Size");
+    expect(labels).toContain("Limit");
+    expect(labels).toContain("Doc id");
+    expect(labels).toContain("Raw reason");
+    // Ids and raw error text are the two things people paste into an issue.
+    expect(i.facts.find((f) => f.label === "Doc id")?.copyable).toBe(true);
+    expect(i.facts.find((f) => f.label === "Raw reason")?.copyable).toBe(true);
+    expect(i.facts.find((f) => f.label === "Limit")?.value).toBe("10 MB per note");
+  });
+
+  it("orphan history is leftover storage, not a risk to anything", () => {
+    const i = issueOf(
+      {
+        stats: statsWith({
+          history: { docs: 5, updates: 20, bytes: 5_000, orphanDocs: 3, orphanBytes: 2_048 },
+        }),
+      },
+      "orphan-history",
+    );
+    expect(i.explanation.safety).toBe("both");
+    expect(i.explanation.meaning).toContain("nothing is at risk");
+    expect(i.remedies).toEqual(["reclaim"]);
+    expect(i.facts.find((f) => f.label === "Space used")?.value).toBe("2 KB");
+  });
+});
+
+describe("too-large: file versus history", () => {
+  /** A census where the FILE is small but the stored history is enormous. */
+  const historyIsTheProblem = statsWith({
+    largestNotes: [{ path: "Small.md", bytes: 2_000, mtime: NOW }],
+    heaviestHistory: [{ docId: "d1", path: "Small.md", updates: 900, bytes: 30 * 1024 * 1024 }],
+  });
+
+  it("blames the history when the file is under the cap and the history is over it", () => {
+    // The uploader's own reason here is the FILE shape — this is the case only
+    // the census can settle, and getting it wrong sends someone to shorten a
+    // 2 KB note.
+    const r = buildHealthReport(
+      input({
+        stats: historyIsTheProblem,
+        failures: {
+          registry: [],
+          content: [
+            {
+              docId: "d1",
+              relPath: "Small.md",
+              reason: "too large to sync (30.0 MB; the limit is 10 MB)",
+              permanent: true,
+            },
+          ],
+          limitCode: null,
+        },
+      }),
+    );
+    const i = r.issues[0];
+    expect(i.why).toContain("edit history");
+    expect(i.remedies[0]).toBe("reset-history");
+    expect(i.explanation.fixes[0]).toContain("Reset this note's history");
+    expect(i.facts.find((f) => f.label === "History size")?.value).toBe("30.0 MB");
+  });
+
+  it("blames the file when the file itself is over the cap", () => {
+    const r = buildHealthReport(
+      input({
+        stats: statsWith({
+          largestNotes: [{ path: "Huge.md", bytes: 12 * 1024 * 1024, mtime: NOW }],
+        }),
+        failures: {
+          registry: [],
+          content: [
+            {
+              docId: "d2",
+              relPath: "Huge.md",
+              reason: "too large to sync (12.4 MB; the limit is 10 MB)",
+              permanent: true,
+            },
+          ],
+          limitCode: null,
+        },
+      }),
+    );
+    const i = r.issues[0];
+    expect(i.why).toContain("12.4 MB");
+    expect(i.remedies[0]).toBe("open");
+    expect(i.explanation.fixes[0]).toContain("attachments");
+    expect(i.explanation.fixes.join(" ")).toContain("Split the note");
+  });
+
+  it("never promotes the file to the cause just because the census didn't measure it", () => {
+    // A note missing from the top-10 list is UNMEASURED, not small. The
+    // uploader's own word stands.
+    const r = buildHealthReport(
+      input({
+        stats: statsWith({ largestNotes: [], heaviestHistory: [] }),
+        failures: {
+          registry: [],
+          content: [
+            {
+              docId: "d3",
+              relPath: "Hist.md",
+              reason: "too large to sync (17.2 MB of edit history; the limit is 10 MB)",
+              permanent: true,
+            },
+          ],
+          limitCode: null,
+        },
+      }),
+    );
+    expect(r.issues[0].why).toContain("edit history");
+    expect(r.issues[0].remedies[0]).toBe("reset-history");
+  });
+});
+
+describe("naming the owner", () => {
+  const owner = { role: "owner", user: { name: "Sam", email: "sam@example.com" } };
+
+  it("names the owner in a no-access explanation when the roster is loaded", () => {
+    const r = buildHealthReport(input({ syncStatus: "no-access", members: [owner] }));
+    const i = r.issues.find((x) => x.kind === "no-access");
+    expect(i?.explanation.meaning).toContain("Sam (sam@example.com)");
+    expect(i?.facts.find((f) => f.label === "Owner")?.value).toBe("Sam (sam@example.com)");
+  });
+
+  it("picks the owner out of the roster, and falls back to the email for a blank name", () => {
+    expect(ownerOf([{ role: "member", user: { name: "A", email: "a@x" } }, owner])).toEqual({
+      name: "Sam",
+      email: "sam@example.com",
+    });
+    expect(ownerOf([{ role: "owner", user: { name: "  ", email: "o@x" } }])).toEqual({
+      name: "o@x",
+      email: "o@x",
+    });
+    expect(ownerOf([{ role: "owner" }])).toBeNull();
+    expect(ownerOf(undefined)).toBeNull();
+  });
+
+  it("falls back to 'the vault's owner' rather than guessing", () => {
+    const r = buildHealthReport(input({ syncStatus: "no-access", members: [] }));
+    const i = r.issues.find((x) => x.kind === "no-access");
+    expect(i?.explanation.meaning).toContain("the vault's owner");
+  });
+
+  it("offers Contact owner on a view-only registration refusal, and only there", () => {
+    const r = buildHealthReport(
+      input({
+        members: [owner],
+        failures: {
+          registry: [
+            { kind: "note", path: "Team/N.md", docId: null, reason: "403", code: "no_write_access" },
+            { kind: "note", path: "Other/N.md", docId: null, reason: "500", code: null },
+          ],
+          content: [],
+          limitCode: null,
+        },
+      }),
+    );
+    const byPath = new Map(r.issues.map((i) => [i.path, i]));
+    expect(byPath.get("Team/N.md")?.remedies).toContain("contact-owner");
+    expect(byPath.get("Team/N.md")?.explanation.meaning).toContain("view-only");
+    expect(byPath.get("Team/N.md")?.explanation.fixes[0]).toContain("Sam");
+    expect(byPath.get("Other/N.md")?.remedies).not.toContain("contact-owner");
+  });
+
+  it("explains each registration code in its own words", () => {
+    const codes: Record<string, string> = {
+      root_frozen: "top level is locked",
+      path_folder_mismatch: "disagree",
+      doc_id_conflict: "already belongs to a different vault",
+    };
+    for (const [code, phrase] of Object.entries(codes)) {
+      const r = buildHealthReport(
+        input({
+          failures: {
+            registry: [{ kind: "note", path: "N.md", docId: null, reason: "refused", code }],
+            content: [],
+            limitCode: null,
+          },
+        }),
+      );
+      expect(r.issues[0].code).toBe(code);
+      expect(r.issues[0].explanation.meaning).toContain(phrase);
+    }
+  });
+});
+
+describe("classifyUploadReason", () => {
+  it("turns the sync layer's own strings into a cause a person can read", () => {
+    expect(classifyUploadReason("open failed: ENOENT")).toContain("could not open");
+    expect(classifyUploadReason("server did not respond to the initial sync")).toContain(
+      "never sent back",
+    );
+    expect(classifyUploadReason("server did not acknowledge the content")).toContain(
+      "never confirmed",
+    );
+    // `syncManager.ts` rejects with the terminal status as the message.
+    expect(classifyUploadReason("no-access")).toContain("view-only");
+    expect(classifyUploadReason("deleted")).toContain("no row for this note");
+    expect(classifyUploadReason("error")).toContain("connection");
+    expect(classifyUploadReason("Failed to fetch")).toContain("could not reach the server");
+    expect(classifyUploadReason("HTTP 503")).toContain("error of its own");
+  });
+
+  it("returns null rather than inventing a cause it doesn't know", () => {
+    expect(classifyUploadReason("wibble")).toBeNull();
+  });
+
+  it("quotes the raw reason when it cannot classify it", () => {
+    const r = buildHealthReport(
+      input({
+        failures: {
+          registry: [],
+          content: [{ docId: "d", relPath: "A.md", reason: "wibble" }],
+          limitCode: null,
+        },
+      }),
+    );
+    expect(r.issues[0].explanation.meaning).toContain("Wibble.");
   });
 });

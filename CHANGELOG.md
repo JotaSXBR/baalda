@@ -467,6 +467,42 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   local-change queue. Pure model in `lib/health/model.ts` (38 tests), Rust census
   in `src-tauri/src/stats.rs` (9 tests). Not a team tab: local vaults get the
   first three stages and every analytic.
+- **Health page, round two — the app points at it, and every failure explains
+  itself.** Entry points: a `SyncIssuesBanner` ("N notes didn't sync" → Open
+  Health / Dismiss, keyed on `failedRunToken` so a dismiss silences one run, not
+  the feature), the corner `SyncBadge` CTA becomes **See why** when a run ends in
+  `error` (`syncBadgeAction`), and `NotSyncingBanner` gains an Open Health
+  button; all open the dialog via a new store `requestSettings(tab)` request
+  consumed by `AccountMenu` (`SettingsTab` moved to `lib/settingsTabs.ts`).
+  Reasoning: every `HealthIssue` now carries `explanation` (meaning / what Baalda
+  does next / what you can do / where the content is), a `facts` table and
+  `autoRetries`; too-large tells a file over the cap from history over the cap
+  (joined against the census) and leads with Reset history for the latter; new
+  remedies `export-copy`, `copy-details`, `reregister`, `contact-owner`. New
+  `SyncManager.syncLog()`/`onSyncLog` (a 200-entry `SyncLog` ring buffer fed at
+  the existing status/progress/failure decision points via additive
+  `ContentUploader.onFailure` and `VaultRegistry.setFailureListener` hooks) and
+  `inspectDoc(docId)` behind a **Check a note** inspector whose verdict never
+  says "confirmed" without the durable `isPushed` checkpoint. **Fifteen
+  integrity checks** from a new Rust `vault_checks` command (`checks.rs`, one
+  shared `census_files` walk with `stats.rs`): empty / unreadable (non-UTF-8,
+  also scanning unindexed markdown) / broken-frontmatter / oversized notes,
+  stale index rows, unindexed markdown, case collisions, Windows-illegal names,
+  long paths, duplicate titles, broken links, missing embeds (resolved like the
+  app resolves them), heavy history, orphan history, and `.context/trash`; plus
+  `empty_trash` and `rebuild_index` commands. Definitions and copy live in
+  `lib/health/checks.ts`. UI split into `HealthIssues/Checks/Inspector/
+  Timeline/Stats`; the pipeline shows three cards (files on disk → connection →
+  remote vault) and reveals index/history only when they are degraded.
+- **Orphan history now means what Reclaim removes.** `vault_stats`/`vault_checks`
+  take the registry's `docId → path` map (`liveDocs`) and call a CRDT doc an
+  orphan only when NEITHER the local `notes` table nor the registry knows its
+  id — the same live set `crdtGc.ts` hands `prune_yjs_docs`. Server-pulled notes
+  carry a registry id the local table never assigned, so the page said "18
+  reclaimable" next to a Reclaim that freed nothing.
+- **Settings modal sized by the viewport** (`clamp(720px, 84vw, 1600px)` ×
+  `clamp(560px, 88vh, 1120px)`) instead of a fixed 1200×860 that read as a small
+  box on large displays.
 - **"Remember email address" on the sign-in dialog** (#120). A `Switch` under the
   password field; when on, the address used at the last SUCCESSFUL sign-in
   prefills the field next time (invitation address still outranks it). Only the

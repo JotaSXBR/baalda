@@ -36,6 +36,7 @@ const fakeRegistry = vi.hoisted(() => {
     setMapListener: vi.fn(),
     setNoteMetaListener: vi.fn(),
     setColorListener: vi.fn(),
+    setFailureListener: vi.fn(),
     setInboundHost: vi.fn(),
     mappedNotes: vi.fn((): Array<{ docId: string; relPath: string }> => []),
     isPushed: vi.fn((docId: string) => reg.pushed.has(docId)),
@@ -318,5 +319,142 @@ describe("SyncManager.retryDoc", () => {
     fakeRegistry.pathForDocId.mockReturnValue(null);
     await sm.retryDoc("doc-unknown");
     expect(fakeRegistry.unmarkPushed).not.toHaveBeenCalled();
+  });
+});
+
+/** `inspectDoc` is the Health page's "Check a note" box. Every field is a fact
+ *  the sync layer already holds; the test's job is to prove none of them is
+ *  inferred, and that a torn-down vault answers about nothing. */
+describe("SyncManager.inspectDoc", () => {
+  it("reports a permanent refusal, and the queue state around a retry", async () => {
+    const sm = manager();
+    await enable(sm);
+
+    // Before anything has run: mapped, nothing claimed.
+    expect(sm.inspectDoc(DOC)).toEqual({
+      pushed: false,
+      queued: false,
+      diverged: false,
+      permanentFailure: null,
+      emptyEverywhere: false,
+    });
+
+    // The size ceiling refuses it: the reason is carried, not summarised.
+    await ready(sm, [DOC]);
+    const refused = sm.inspectDoc(DOC);
+    expect(refused.permanentFailure).toContain("the limit is 10 MB");
+    expect(refused.queued).toBe(false);
+
+    // Retry queues it, forgets the refusal, withdraws the pushed claim and marks
+    // it diverged — all four are visible here, which is the point of the box.
+    fakeDisk.files.set(REL, "now small");
+    await sm.retryDoc(DOC);
+    expect(sm.inspectDoc(DOC)).toEqual({
+      pushed: false,
+      queued: true,
+      diverged: true,
+      permanentFailure: null,
+      emptyEverywhere: false,
+    });
+
+    // Once the push lands, the queue is empty and the server has it.
+    await drainLocalChanges(sm);
+    const settled = sm.inspectDoc(DOC);
+    expect(settled.queued).toBe(false);
+    expect(settled.pushed).toBe(true);
+    expect(settled.diverged).toBe(false);
+  });
+
+  it("settles a note that is empty here AND on the server", async () => {
+    const sm = manager();
+    await enable(sm);
+    fakeDisk.files.set(REL, "");
+    fakeRegistry.emptyOnDisk = new Set([REL]);
+
+    await ready(sm, [DOC]);
+    const inspected = sm.inspectDoc(DOC);
+    // Nothing anywhere is not a failure — it is confirmed by definition, and
+    // this flag is what stops it being re-queued on every single connect.
+    expect(inspected.emptyEverywhere).toBe(true);
+    expect(inspected.pushed).toBe(true);
+    expect(inspected.permanentFailure).toBe(null);
+  });
+
+  it("answers about nothing when no vault is live", async () => {
+    const sm = manager();
+    const empty = {
+      pushed: false,
+      queued: false,
+      diverged: false,
+      permanentFailure: null,
+      emptyEverywhere: false,
+    };
+    expect(sm.inspectDoc(DOC)).toEqual(empty);
+
+    await enable(sm);
+    await ready(sm, [DOC]);
+    expect(sm.inspectDoc(DOC).permanentFailure).not.toBe(null);
+
+    // After teardown the registry still holds whatever a fake left behind; the
+    // scope guard is what makes the answer honest rather than the vault we left.
+    sm.disable();
+    expect(sm.inspectDoc(DOC)).toEqual(empty);
+  });
+});
+
+/** The timeline behind the Health page. It is not a debug log: every line has to
+ *  be a sentence about the user's notes. */
+describe("SyncManager.syncLog", () => {
+  it("records the run, the server's requests and a note's refusal", async () => {
+    const sm = manager();
+    await enable(sm);
+    await ready(sm, [DOC]);
+
+    const events = sm.syncLog().map((e) => e.event);
+    expect(events).toContain("server-empty");
+    expect(events).toContain("run-start");
+    expect(events).toContain("too-large");
+
+    const refusal = sm.syncLog().find((e) => e.event === "too-large")!;
+    expect(refusal.level).toBe("error");
+    expect(refusal.docId).toBe(DOC);
+    expect(refusal.path).toBe(REL);
+    expect(refusal.message).toContain(REL);
+
+    // A terminal run with failures says so, in a whole sentence.
+    const ended = sm.syncLog().find((e) => e.event === "run-failed");
+    expect(ended?.message).toMatch(/not synced$/);
+
+    // No jargon reaches the page.
+    for (const e of sm.syncLog()) {
+      expect(e.message).not.toMatch(/CRDT|state vector|manifest|docId|Y\.Doc/i);
+    }
+  });
+
+  it("records a retry, and notifies subscribers", async () => {
+    const sm = manager();
+    await enable(sm);
+    const seen: number[] = [];
+    const off = sm.onSyncLog(() => seen.push(sm.syncLog().length));
+
+    await sm.retryDoc(DOC);
+    const retry = sm.syncLog().find((e) => e.event === "retry");
+    expect(retry?.message).toBe(`Retrying ${REL}`);
+    expect(retry?.path).toBe(REL);
+    expect(seen.length).toBeGreaterThan(0);
+
+    off();
+    const before = seen.length;
+    await sm.retrySync();
+    expect(seen.length).toBe(before);
+  });
+
+  it("empties on teardown — the vault you left explains nothing about this one", async () => {
+    const sm = manager();
+    await enable(sm);
+    await ready(sm, [DOC]);
+    expect(sm.syncLog().length).toBeGreaterThan(0);
+    sm.disable();
+    expect(sm.syncLog()).toEqual([]);
   });
 });

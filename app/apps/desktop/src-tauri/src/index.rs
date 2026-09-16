@@ -1613,12 +1613,37 @@ impl Index {
     // row dumps: the Health page wants totals, and a vault with 90 000 link
     // rows must not ship them through the IPC boundary to be counted in TS.
 
-    /// Every note's `(doc_id, path)`, for the census's file classifier: a file
-    /// on disk is a *note* exactly when its vault-relative path is a row here.
-    /// Lighter than `list_note_titles` (no title column, no ORDER BY), which is
-    /// what makes it cheap enough to call on a several-thousand-note vault.
-    pub fn note_paths(&self) -> AppResult<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT id, path FROM notes")?;
+    /// Every `notes` row the census and its integrity checks need: the file
+    /// classifier (a file on disk is a *note* exactly when its vault-relative
+    /// path is a row here), the `duplicate-titles` check, and the `stale-index`
+    /// check's stored mtime. Unordered and un-joined — cheap enough to call on a
+    /// several-thousand-note vault, unlike `list_note_titles`' ORDER BY.
+    ///
+    /// `mtime` is in SECONDS (what `file_mtime` writes), not the milliseconds
+    /// every disk-side number in `stats.rs` carries.
+    pub fn note_rows(&self) -> AppResult<Vec<NoteRow>> {
+        let mut stmt = self.conn.prepare("SELECT id, path, title, mtime FROM notes")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(NoteRow {
+                id: r.get(0)?,
+                path: r.get(1)?,
+                title: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                mtime: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Every wikilink that resolved to nothing, as `(src_note_id, raw target)`,
+    /// grouped by source and in document order within it. The `broken-links`
+    /// check reports these per SOURCE note, so the caller folds the rows; the
+    /// vault-wide total is `link_counts().broken`.
+    pub fn unresolved_links(&self) -> AppResult<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT src_note_id, COALESCE(dst_path_raw, '') FROM links
+              WHERE dst_note_id IS NULL
+              ORDER BY src_note_id, position",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
@@ -1708,6 +1733,18 @@ impl Index {
             .unwrap_or(0);
         page_count * page_size
     }
+}
+
+/// One `notes` row as the Health census reads it — see [`Index::note_rows`].
+#[derive(Debug, Clone)]
+pub struct NoteRow {
+    pub id: String,
+    pub path: String,
+    /// The derived index title (frontmatter `title:` → first H1 → stem), which
+    /// is NOT what the sidebar displays. Empty when the column is NULL.
+    pub title: String,
+    /// The mtime recorded at index time, in SECONDS.
+    pub mtime: i64,
 }
 
 /// Resolved vs dangling wikilinks — see [`Index::link_counts`].
