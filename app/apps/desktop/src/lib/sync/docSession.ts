@@ -1405,6 +1405,10 @@ export class SyncManager implements InboundHost {
       this.emptyEverywhere.delete(mapping.docId);
       this.permanentFailures.delete(mapping.docId);
       this.localChanges.set(mapping.docId, relPath);
+      this.note("info", "push-queued", "Changed on disk while closed — checking it against the server", {
+        docId: mapping.docId,
+        path: relPath,
+      });
       this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
       // A doc resident in the hot tier has a LIVE bridge, and its next egest (a
       // remote update landing) would overwrite the file's new bytes before the
@@ -1767,6 +1771,10 @@ export class SyncManager implements InboundHost {
     // The file at the new path may hold edits made in the same breath as the
     // rename, and the note's row moved, so both surfaces need telling.
     this.localChanges.set(docId, to);
+    this.note("info", "push-queued", "Renamed on disk — re-sending it under the new name", {
+      docId,
+      path: to,
+    });
     this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
     this.onNotePathChanged?.(docId, from, to);
   }
@@ -1855,6 +1863,9 @@ export class SyncManager implements InboundHost {
       ingestFromFile: true,
       mustConnect: (docId) => this.divergedDocs.has(docId),
       progress,
+      // Most local-change runs are our own egest echoing back; the pill only
+      // says "Syncing" once a note actually needs the server.
+      lazyPhase: true,
       onFailure: (f) => this.logUploadFailure(f),
       shouldStop: (): boolean => !scope.isCurrent() || this.uploader !== uploader,
     });
@@ -3189,6 +3200,10 @@ export class SyncManager implements InboundHost {
         const relPath = this.registry.pathForDocId(docId);
         if (relPath) {
           this.localChanges.set(docId, relPath);
+          this.note("info", "push-queued", "Merged an edit made outside Baalda — sending the result", {
+            docId,
+            path: relPath,
+          });
           this.armLocalChangeDrain(scope, LOCAL_CHANGE_DEBOUNCE_MS);
         }
       },

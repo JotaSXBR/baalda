@@ -2667,7 +2667,7 @@ body:has(.sidebar-resizer.dragging) {
 .tab-label {
   background: none;
   border: 0;
-  padding: 7px var(--sp-1) 7px var(--sp-4);
+  padding: 7px 0 7px var(--sp-4);
   font: inherit;
   font-size: var(--fs-sm);
   color: inherit;
@@ -2685,7 +2685,10 @@ body:has(.sidebar-resizer.dragging) {
   flex: none;
   width: 20px;
   height: 20px;
-  margin: 0 var(--sp-2) 0 var(--sp-1);
+  /* Equal air on both sides of the ×, and no UA button padding: the glyph is
+     centred by the grid, so any padding only shifts the hover square. */
+  margin: 0 var(--sp-2);
+  padding: 0;
   border: 0;
   border-radius: 6px;
   background: none;

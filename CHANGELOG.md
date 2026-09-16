@@ -53,6 +53,22 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
   builds now use thin LTO, one codegen unit and a stripped binary.
 
 ### Fixed
+- **"Syncing" flash on every note open/switch.** `ContentUploader.run()`
+  announced `phase("uploading", n)` and stamped every queued doc `queued`
+  BEFORE the per-note ingest fast-path decided whether anything had changed, so
+  a local-change run made of nothing but our own egest echo flipped the pill
+  to "Syncing 0/1" and straight back. New `lazyPhase` option (set by
+  `runLocalChangePush`): the phase is announced — sized to the notes not yet
+  settled — the first time a note needs `connect()` or fails; quiet settles
+  before that neither change the phase nor bump the previous phase's counters,
+  and still stamp `synced`. Three tests in `contentUpload.test.ts`. Each
+  local-change queue site now records a `push-queued` timeline entry naming
+  the trigger (changed on disk while closed / renamed on disk / merged an
+  outside edit), so "why did it sync?" is answerable from the Health page.
+- **Tab bar:** no hover fill on inactive tabs; `.tab-close` has equal margins
+  and no UA padding; the active card's fillets are back at `--tab-radius`
+  (14px) and start ON the border column, so the card's straight side turns
+  into the arc instead of continuing past it (the "stubs").
 - **Sidebar sync marks hidden until the server answers** (`sidebarMarksVisible`
   in `syncRollup.ts`, consulted by `FileTree`'s index memo). An offline launch
   drew a hollow dot on every note and a "0/N" wave on every folder: the registry
